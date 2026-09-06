@@ -334,6 +334,14 @@ Singleton {
                 property list<string> ignoredAppRegexes: []
             }
 
+            property JsonObject input: JsonObject {
+                property int version: 1
+                // Empty layout = no intent, stock Hyprland config applies and no file is generated
+                property string layout: ""
+                property string variant: ""
+                property string options: ""
+            }
+
             property JsonObject interactions: JsonObject {
                 property JsonObject scrolling: JsonObject {
                     property bool fasterTouchpadScroll: false // Enable faster scrolling with touchpad

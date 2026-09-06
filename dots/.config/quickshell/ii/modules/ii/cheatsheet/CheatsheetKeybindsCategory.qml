@@ -70,6 +70,8 @@ Column {
         "mouse:275": "MouseBack",
         "Slash": "/",
         "Hash": "#",
+        "comma": ",",
+        "asterisk": "*",
         "Return": "Enter",
         // "Shift": "",
       },
@@ -125,6 +127,20 @@ Column {
         return false;
     }
 
+    // Groups descriptions that differ only by number/direction, e.g. the ten
+    // workspace rows. A repetitive row is shown only when its group has no
+    // first row; layout-resolved twins carrying unique descriptions survive.
+    function repetitiveGroupKey(bind) {
+        return bind.description.replace(/\d+/g, "#").replace(/\b(left|right|up|down)\b/i, "~");
+    }
+
+    function showRepetitive(pool, bind) {
+        if (!root.containsNonFirstRepetitive(bind)) return true;
+        const group = root.repetitiveGroupKey(bind);
+        return !pool.some(other => other !== bind && root.repetitiveGroupKey(other) === group
+            && (other.key.includes("1") || /^(left)\b/i.test(other.key)));
+    }
+
     function containsFirstRepetitive(bind) {
         const key = bind.key;
         return key.includes("1") || /left/i.test(key);
@@ -153,9 +169,11 @@ Column {
             id: repeater
             model: {
                 if (!root.isCategorized) {
-                    return HyprlandKeybinds.keybinds.filter(bind => root.hasDescription(bind) && root.isUncategorized(bind) && !root.containsNonFirstRepetitive(bind));
+                    const pool = HyprlandKeybinds.keybinds.filter(bind => root.hasDescription(bind) && root.isUncategorized(bind));
+                    return pool.filter(bind => root.showRepetitive(pool, bind));
                 }
-                return HyprlandKeybinds.keybinds.filter(bind => root.hasDescription(bind) && root.isCategory(bind, root.categoryName) && !root.containsNonFirstRepetitive(bind));
+                const pool = HyprlandKeybinds.keybinds.filter(bind => root.hasDescription(bind) && root.isCategory(bind, root.categoryName));
+                return pool.filter(bind => root.showRepetitive(pool, bind));
             }
             delegate: BindLine {
                 required property var modelData

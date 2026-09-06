@@ -18,6 +18,12 @@ require("hyprland.rules")
 require("hyprland.colors")
 require("hyprland.keybinds")
 
+-- Fork input overrides (generated; unbinds stock binds it replaces, so it loads
+-- before custom.* and hand-written customs keep the final word) --
+if is_file_exists(HOME .. "/.config/hypr/custom/input-generated.lua") then
+    require("custom.input-generated")
+end
+
 -- Custom configurations --
 if is_file_exists(HOME .. "/.config/hypr/custom/execs.lua") then
     require("custom.execs")

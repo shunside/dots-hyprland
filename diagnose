@@ -95,6 +95,18 @@ x Hyprland --version
 x _check_quickshell_version
 x _check_PKGBUILD_version
 
+e "Checking keyboard/input"
+x python3 -c 'import json,os;p=os.environ.get("XDG_CONFIG_HOME",os.path.expanduser("~/.config"));print(json.load(open(os.path.join(p,"illogical-impulse/config.json"))).get("input"))'
+x ls -l ~/.config/hypr/custom/input-generated.lua
+x head -n 12 ~/.config/hypr/custom/input-generated.lua
+x dots/.config/quickshell/ii/scripts/hyprland/input-layout-apply --check
+if command -v hyprctl >/dev/null 2>&1;then
+  x hyprctl getoption input:kb_layout
+  x hyprctl getoption input:resolve_binds_by_sym
+else
+  echo "hyprctl not found, skipping live input check."
+fi
+
 e "Finished. Output saved as \"$output_file\"."
 if ! command -v curl 2>&1 >>/dev/null ;then echo "\"curl\" not found, pastebin upload unavailable.";exit;fi
 echo "(Optional) Do you agree to upload the file \"$output_file\" to the online pastebin (https://0x0.st)?"

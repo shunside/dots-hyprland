@@ -92,6 +92,13 @@ ComboBox {
 
         required property var model
         required property int index
+
+        // Custom delegates must commit the selection explicitly.
+        onClicked: {
+            root.currentIndex = itemDelegate.index;
+            root.activated(itemDelegate.index);
+            root.popup.close();
+        }
         property color color: {
             if (root.currentIndex === itemDelegate.index) {
                 if (itemDelegate.down) return Appearance.colors.colSecondaryContainerActive;
