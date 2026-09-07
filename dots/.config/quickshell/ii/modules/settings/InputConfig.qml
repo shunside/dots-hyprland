@@ -520,10 +520,12 @@ ContentSection {
             onStreamFinished: {
                 try {
                     const list = JSON.parse(catalogCollector.text).map(a => ({
-                        displayName: a.label, value: a.id, needsCommand: a.needsCommand
+                        displayName: a.advanced ? `${a.label} (${Translation.tr("advanced")})` : a.label,
+                        value: a.id, hint: a.hint, advanced: a.advanced, needsCommand: a.needsCommand
                     }));
                     hwSection.hwCatalog = list;
-                    if (hwSection.pickedAction === "" && list.length > 0) hwSection.pickedAction = list[0].value;
+                    const firstBuiltIn = list.find(a => !a.advanced);
+                    if (hwSection.pickedAction === "" && firstBuiltIn !== undefined) hwSection.pickedAction = firstBuiltIn.value;
                 } catch (e) {
                     console.error("[HwKeys] catalog parse failed:", e);
                 }
@@ -734,7 +736,34 @@ ContentSection {
                 wrapMode: Text.WordWrap
                 color: Appearance.colors.colSubtext
                 font.pixelSize: Appearance.font.pixelSize.small
-                text: Translation.tr("Multiple keys in one attempt look like a chord or macro; remapping those is deferred.");
+                text: Translation.tr("Looks like a normal keyboard shortcut — Hardware Keys only takes single special keys. Add shortcuts to ~/.config/hypr/custom/keybinds.lua instead; if the syntax is unfamiliar, an AI assistant can help you write it safely.")
+            }
+            ConfigRow {
+                visible: !hwSection.assignEligible() && hwSection.capPressCodes().length > 1
+                RippleButtonWithIcon {
+                    id: copyKeybindsPathButton
+                    property bool justCopied: false
+                    Layout.fillWidth: false
+                    buttonRadius: Appearance.rounding.small
+                    materialIcon: justCopied ? "check" : "content_copy"
+                    mainText: justCopied ? Translation.tr("Path copied") : Translation.tr("Copy path")
+                    onClicked: {
+                        copyKeybindsPathButton.justCopied = true
+                        Quickshell.clipboardText = FileUtils.trimFileProtocol(`${Directories.config}/hypr/custom/keybinds.lua`);
+                        copyPathRevertTimer.restart();
+                    }
+                    colBackground: ColorUtils.transparentize(Appearance.colors.colPrimaryContainer)
+                    colBackgroundHover: Appearance.colors.colPrimaryContainerHover
+                    colRipple: Appearance.colors.colPrimaryContainerActive
+
+                    Timer {
+                        id: copyPathRevertTimer
+                        interval: 1500
+                        onTriggered: {
+                            copyKeybindsPathButton.justCopied = false;
+                        }
+                    }
+                }
             }
             StyledText {
                 Layout.fillWidth: true
@@ -789,9 +818,23 @@ ContentSection {
             }
             options: hwSection.hwCatalog
         }
+        StyledText {
+            Layout.fillWidth: true
+            wrapMode: Text.WordWrap
+            color: Appearance.colors.colSubtext
+            font.pixelSize: Appearance.font.pixelSize.small
+            text: {
+                const found = hwSection.hwCatalog.find(a => a.value === hwSection.pickedAction);
+                if (found === undefined) return "";
+                if (found.value === "custom") {
+                    return Translation.tr("Runs a shell command as your user when the key is pressed. Only needed when no built-in action fits.");
+                }
+                return found.hint || "";
+            }
+        }
         MaterialTextField {
             Layout.fillWidth: true
-            visible: (hwSection.hwCatalog.find(a => a.value === hwSection.pickedAction) || {}).needsCommand === true
+            visible: hwSection.pickedAction === "custom"
             placeholderText: Translation.tr("Command, e.g. notify-send Hello")
             text: hwSection.customCommand
             onEditingFinished: hwSection.customCommand = text.trim()
