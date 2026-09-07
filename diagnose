@@ -100,6 +100,7 @@ x python3 -c 'import json,os;p=os.environ.get("XDG_CONFIG_HOME",os.path.expandus
 x ls -l ~/.config/hypr/custom/input-generated.lua
 x head -n 12 ~/.config/hypr/custom/input-generated.lua
 x dots/.config/quickshell/ii/scripts/hyprland/input-layout-apply --check
+x dots/.config/quickshell/ii/scripts/hyprland/hwkeys-apply --check
 if command -v hyprctl >/dev/null 2>&1;then
   x hyprctl getoption input:kb_layout
   x hyprctl getoption input:resolve_binds_by_sym

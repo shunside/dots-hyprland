@@ -23,6 +23,9 @@ require("hyprland.keybinds")
 if is_file_exists(HOME .. "/.config/hypr/custom/input-generated.lua") then
     require("custom.input-generated")
 end
+if is_file_exists(HOME .. "/.config/hypr/custom/hwkeys-generated.lua") then
+    require("custom.hwkeys-generated")
+end
 
 -- Custom configurations --
 if is_file_exists(HOME .. "/.config/hypr/custom/execs.lua") then

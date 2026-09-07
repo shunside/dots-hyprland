@@ -342,6 +342,13 @@ Singleton {
                 property string options: ""
             }
 
+            // Machine-specific hardware-key mappings (Slice 2A: raw code: only).
+            // Each entry: {id, code, action, command (custom only), enabled}.
+            property JsonObject hardwareKeys: JsonObject {
+                property int version: 1
+                property list<var> bindings: []
+            }
+
             property JsonObject interactions: JsonObject {
                 property JsonObject scrolling: JsonObject {
                     property bool fasterTouchpadScroll: false // Enable faster scrolling with touchpad
