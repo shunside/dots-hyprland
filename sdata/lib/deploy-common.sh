@@ -165,6 +165,21 @@ function deploy_apply_source_swaps(){
   fi
 }
 
+# Deployment state is durable JSON and must be parsed semantically, never
+# with byte-format assumptions (whitespace, key order). jq is the parser:
+# it is already a repository dependency precedent (virtmon requires it via
+# ensure_cmds). Every entry point that reads state calls this first; a
+# missing jq fails closed with an explicit message (read-only tools must
+# not install packages to satisfy their own dependencies).
+function deploy_require_jq(){
+  if command -v jq >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "error: 'jq' is required to read deployment state but was not found." >&2
+  echo "Install jq with your package manager (e.g. pacman -S jq) and re-run." >&2
+  return 1
+}
+
 # Longest-prefix registry lookup for a repo-relative payload path (stdout):
 # "<rule-index>\texcluded\t" when an exclude matched, or
 # "<rule-index>\tincluded\t<home-relative-path>".

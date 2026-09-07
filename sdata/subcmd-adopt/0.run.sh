@@ -19,6 +19,11 @@ DEPLOY_LIB_DIR="${DEPLOY_LIB_DIR:-${REPO_ROOT}/sdata/lib}"
 source "${DEPLOY_LIB_DIR}/deploy-common.sh"
 source "${DEPLOY_LIB_DIR}/deploy-state.sh"
 
+# jq reads deployment state (status verification); fail closed first.
+if ! deploy_require_jq; then
+  exit 1
+fi
+
 DEPLOY_ORDER=(adoptable drifted missing sidecar-clean sidecar-drifted sidecar-missing preserved user-absent input-excluded unclassified submodule-present submodule-missing error)
 
 # --- --status: pure readback, no comparison needed. ---

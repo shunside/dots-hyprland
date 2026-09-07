@@ -37,6 +37,8 @@ Options:
   --apply        Record the adoption baseline durably (fail-closed, see above).
   --status       Read back recorded adoption state (read-only).
   -h, --help     Show this help message.
+
+Requires: jq (for reading deployment state).
 "
 }
 

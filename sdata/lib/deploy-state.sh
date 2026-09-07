@@ -216,18 +216,31 @@ function deploy_verify_files(){
   local id="$sd/$DEPLOY_IDENTITY_NAME" mf="$sd/$DEPLOY_MANIFEST_NAME" ev="$sd/$DEPLOY_EVIDENCE_NAME"
   [[ -f "$id" && -f "$mf" && -f "$ev" ]] || { echo "verify: state files missing" >&2; return 1; }
   local want_sha got_sha want_mf want_ev got_mf got_ev
-  # (Trailing `|| true`: absent fields must reach the explicit check below
-  # as empty, not trip `set -e` inherited from setup.)
-  want_sha=$(grep -o '"manifest_sha256": "[0-9a-f]*"' "$id" | head -n 1 | cut -d'"' -f4 || true)
-  want_mf=$(grep -o '"manifest_records": [0-9]*' "$id" | head -n 1 | grep -o '[0-9]*' || true)
-  want_ev=$(grep -o '"legacy_evidence_records": [0-9]*' "$id" | head -n 1 | grep -o '[0-9]*' || true)
-  if [[ -z "$want_sha" || -z "$want_mf" || -z "$want_ev" ]]; then
-    echo "verify: identity fields unreadable" >&2
+  # Identity fields are parsed semantically with jq: byte format,
+  # whitespace, and key order must never matter for durable state.
+  # (Trailing `|| true`: malformed JSON must reach the explicit check
+  # below, not trip `set -e` inherited from setup.)
+  local idline
+  if ! idline=$(jq -r '[.manifest_sha256 // "__MISSING__", ((.manifest_records // "__MISSING__") | tostring), ((.legacy_evidence_records // "__MISSING__") | tostring)] | join("\t")' "$id" 2>/dev/null); then
+    echo "verify: identity is not valid JSON" >&2
+    return 1
+  fi
+  IFS=$'\t' read -r want_sha want_mf want_ev <<<"$idline"
+  if [[ ! "$want_sha" =~ ^[0-9a-f]{64}$ || ! "$want_mf" =~ ^[0-9]+$ || ! "$want_ev" =~ ^[0-9]+$ ]]; then
+    echo "verify: identity fields missing or malformed" >&2
     return 1
   fi
   got_sha=$(sha256sum "$mf" | awk '{print $1}')
-  got_mf=$(grep -c . "$mf" || true)
-  got_ev=$(grep -c . "$ev" || true)
+  # Record counts are semantic (JSON values per file), never line counts:
+  # pretty-printing must not change what verification accepts.
+  if ! got_mf=$(jq -s 'length' "$mf" 2>/dev/null); then
+    echo "verify: manifest is not valid JSON" >&2
+    return 1
+  fi
+  if ! got_ev=$(jq -s 'length' "$ev" 2>/dev/null); then
+    echo "verify: evidence file is not valid JSON" >&2
+    return 1
+  fi
   if [[ "$want_sha" != "$got_sha" ]]; then
     echo "verify: manifest sha256 mismatch (tampered or torn write)" >&2
     return 1
