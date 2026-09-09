@@ -180,6 +180,55 @@ function deploy_require_jq(){
   return 1
 }
 
+# Content fingerprint of a directory tree (stdout `tree:<hex>`).
+# Answers only "has this tree changed since observed" — never "equals some
+# upstream revision" (offline content has no upstream anchor).
+# Byte format (stability contract — changing it invalidates every recorded
+# fingerprint, so never change silently): entries sorted by relpath bytes
+# (LC_ALL=C); each entry is `relpath \x01 descriptor` NUL-terminated, where
+# descriptor is `f:<mode-octal>:<blob-sha>` (regular files), `l:<target>`
+# (symlinks), `d` (dirs), `o:<find-type-char>` (anything else). Timestamps
+# and owners are deliberately excluded; modes are included. Fully piped
+# (no temp files). Fails on unreadable entries or hostile names.
+function deploy_submodule_fingerprint(){
+  local dir="$1"
+  if [[ ! -d "$dir" || -L "$dir" ]]; then
+    echo "error: not a directory: $dir" >&2
+    return 1
+  fi
+  # Readability pre-pass: the hashing pipeline below cannot reliably
+  # propagate per-entry failures without pipefail, so prove readability
+  # first (GNU find; consistent with the stat -c usage elsewhere here).
+  if [[ -n "$(find "$dir" -mindepth 1 ! -readable -print -quit 2>/dev/null)" ]]; then
+    echo "error: unreadable entry inside tree: $dir" >&2
+    return 1
+  fi
+  local digest
+  if ! digest=$(
+    find "$dir" -mindepth 1 -printf '%P\0%y\0' 2>/dev/null | {
+      local rel type desc h m t
+      while IFS= read -r -d '' rel && IFS= read -r -d '' type; do
+        case "$type" in
+          f)
+            m=$(stat -c %a -- "$dir/$rel" 2>/dev/null) || exit 1
+            h=$(git -C "$REPO_ROOT" hash-object -- "$dir/$rel" 2>/dev/null) || exit 1
+            desc="f:$m:$h";;
+          l)
+            t=$(readlink -- "$dir/$rel" 2>/dev/null) || exit 1
+            desc="l:$t";;
+          d) desc="d";;
+          *) desc="o:$type";;
+        esac
+        printf '%s\x01%s\0' "$rel" "$desc"
+      done | LC_ALL=C sort -z | sha256sum | awk '{print $1}'
+    }
+  ); then
+    echo "error: cannot fingerprint tree (unreadable entry?): $dir" >&2
+    return 1
+  fi
+  printf 'tree:%s\n' "$digest"
+}
+
 # Longest-prefix registry lookup for a repo-relative payload path (stdout):
 # "<rule-index>\texcluded\t" when an exclude matched, or
 # "<rule-index>\tincluded\t<home-relative-path>".

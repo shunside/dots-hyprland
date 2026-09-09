@@ -5,9 +5,13 @@
 # classifier TSV to stdout and a human summary to stderr, zero writes.
 # --apply records the baseline durably (manifest + legacy evidence +
 # identity, inside the resolved state dir only) and refuses while the
-# classification is incomplete. --status reads back recorded state.
+# classification is incomplete. --reconcile re-evaluates an already-adopted
+# machine under the current registry/revision (same writes, same
+# never-touch-deployed-files guarantee) while preserving adoption
+# provenance; drifted/missing rows are re-observed, never laundered into
+# confirmed. --status reads back recorded state.
 # Exit codes: 0 completed/recorded/adoption-complete; 2 incomplete-or-absent state
-# (status mode) or refused apply; 1 hard error or corrupt state.
+# (status mode) or refused apply/reconcile; 1 hard error or corrupt state.
 
 # shellcheck shell=bash
 
@@ -131,7 +135,7 @@ print_sections(){
 }
 
 # --- Dry-run (default): report only. ---
-if [[ "${DEPLOY_WANT_APPLY}" != true ]]; then
+if [[ "${DEPLOY_WANT_APPLY}" != true && "${DEPLOY_WANT_RECONCILE:-false}" != true ]]; then
   {
   echo "[$0]: adoption dry-run (zero writes performed)"
   echo "  target:   ${DEPLOY_SHA} (${DEPLOY_ONELINE})"
@@ -165,9 +169,13 @@ if [[ "${DEPLOY_WANT_APPLY}" != true ]]; then
   exit 0
 fi
 
-# --- --apply: fail closed BEFORE any write (not even mkdir). ---
+# --- --apply/--reconcile: fail closed BEFORE any write (not even mkdir). ---
 {
-echo "[$0]: adoption apply requested"
+if [[ "${DEPLOY_WANT_RECONCILE:-false}" == true ]]; then
+  echo "[$0]: adoption reconciliation requested (re-evaluate under current registry; deployed/user files untouched)"
+else
+  echo "[$0]: adoption apply requested"
+fi
 if (( ${DEPLOY_COUNTS[unclassified]:-0} > 0 )); then
   echo "[$0]: REFUSED: ${DEPLOY_COUNTS[unclassified]} unclassified payload paths (see TSV); classify them in the registry first" >&2
   exit 2
@@ -188,19 +196,67 @@ if [[ -z "$STATE_DIR" ]]; then
 fi
 } >&2
 
-# Existing state decides whether publication may proceed: absent/incomplete
-# may be (over)written; complete or corrupt must never be clobbered here.
-# (Guarded assignment: `absent` reports rc 2, which must not trip `set -e`.)
-STATUS_RC=0
-STATUS_PRE=$(deploy_status "$STATE_DIR" 2>/dev/null) || STATUS_RC=$?
-if [[ "$STATUS_RC" == 0 ]]; then
-  echo "[$0]: REFUSED: complete adoption already recorded at $STATE_DIR (re-baseline is not implemented yet)" >&2
-  exit 2
-fi
-if [[ "$STATUS_RC" == 1 ]]; then
-  echo "[$0]: REFUSED: existing state is corrupt; inspect manually before re-adopting:" >&2
-  deploy_status "$STATE_DIR" >&2 || true
-  exit 2
+# Reconciliation provenance (only read when --reconcile was asked).
+RECON_ADOPTED_AT=""
+RECON_FROM_REV=""
+RECON_DEPLOYED_LINE=""
+RECON_LASTAPPLY_FRAG=""
+
+if [[ "${DEPLOY_WANT_RECONCILE:-false}" == true ]]; then
+  # An open or crashed transaction owns live+metadata truth right now;
+  # re-baselining underneath it would strand snapshots and poison resume.
+  # Any lock file refuses first: --break-lock releases the mutex only, and
+  # resume/abort still govern afterwards.
+  if [[ -f "$STATE_DIR/apply.lock" ]]; then
+    echo "[$0]: REFUSED: lock present in $STATE_DIR; break it only when dead (--break-lock), then resume/abort any open transaction before reconciling" >&2
+    exit 2
+  fi
+  # Guarded assignment: non-zero status must reach the branches below, not
+  # trip `set -e` inherited from setup.
+  RECON_STATUS_RC=0
+  deploy_status "$STATE_DIR" >/dev/null 2>&1 || RECON_STATUS_RC=$?
+  if [[ "$RECON_STATUS_RC" == 1 ]]; then
+    echo "[$0]: REFUSED: existing state is corrupt; inspect manually before reconciling:" >&2
+    deploy_status "$STATE_DIR" >&2 || true
+    exit 1
+  fi
+  if [[ "$RECON_STATUS_RC" != 0 ]]; then
+    echo "[$0]: REFUSED: --reconcile needs complete adoption state (nothing to re-evaluate; use --apply for a fresh adoption):" >&2
+    deploy_status "$STATE_DIR" >&2 || true
+    exit 2
+  fi
+  # Preserve adoption provenance; the new baseline observes live state
+  # afresh but must not invent deployment history.
+  RECON_ID="$STATE_DIR/$DEPLOY_IDENTITY_NAME"
+  RECON_ADOPTED_AT=$(jq -r '.adopted_at // empty' "$RECON_ID" 2>/dev/null || true)
+  RECON_FROM_REV=$(jq -r '.revision // empty' "$RECON_ID" 2>/dev/null || true)
+  if [[ -z "$RECON_ADOPTED_AT" || -z "$RECON_FROM_REV" ]]; then
+    echo "[$0]: REFUSED: existing identity lacks adoption provenance (adopted_at/revision); manual recovery needed" >&2
+    exit 1
+  fi
+  RECON_DEPLOYED_JSON=$(jq -c '.deployed_revision // null' "$RECON_ID" 2>/dev/null || echo "null")
+  RECON_LASTAPPLY_JSON=$(jq -c '.last_apply // null' "$RECON_ID" 2>/dev/null || echo "null")
+  if [[ "$RECON_DEPLOYED_JSON" != "null" ]]; then
+    printf -v RECON_DEPLOYED_LINE '  "deployed_revision": %s,\n' "$RECON_DEPLOYED_JSON"
+  fi
+  if [[ "$RECON_LASTAPPLY_JSON" != "null" ]]; then
+    RECON_LASTAPPLY_FRAG=$',\n  "last_apply": '"${RECON_LASTAPPLY_JSON}"
+  fi
+else
+  # Existing state decides whether publication may proceed: absent/incomplete
+  # may be (over)written; complete or corrupt must never be clobbered here.
+  # (Guarded assignment: `absent` reports rc 2, which must not trip `set -e`.)
+  STATUS_RC=0
+  STATUS_PRE=$(deploy_status "$STATE_DIR" 2>/dev/null) || STATUS_RC=$?
+  if [[ "$STATUS_RC" == 0 ]]; then
+    echo "[$0]: REFUSED: complete adoption already recorded at $STATE_DIR (use --reconcile to re-evaluate under the current registry)" >&2
+    exit 2
+  fi
+  if [[ "$STATUS_RC" == 1 ]]; then
+    echo "[$0]: REFUSED: existing state is corrupt; inspect manually before re-adopting:" >&2
+    deploy_status "$STATE_DIR" >&2 || true
+    exit 2
+  fi
 fi
 
 if ! mkdir -p "$STATE_DIR"; then
@@ -218,10 +274,22 @@ if [[ "$EV_COUNT" != "$EV_COUNT_CHECK" ]]; then
 fi
 if [[ "${DEPLOY_EFF_VIANIX}" == true ]]; then VIANIX_JSON="true"; else VIANIX_JSON="false"; fi
 if [[ -n "$DEPLOY_EFF_FONTSET" ]]; then FONTSET_JSON="\"$(deploy_json_escape "$DEPLOY_EFF_FONTSET")\""; else FONTSET_JSON="null"; fi
+# Reconciliation keeps the original adoption moment and any deployment
+# history the updater itself previously proved; only fresh observation
+# (manifest/counts/fully_deployed) is re-derived. Fresh adoption mints them.
+if [[ "${DEPLOY_WANT_RECONCILE:-false}" == true ]]; then
+  RECON_TOOL="setup adopt --reconcile"
+  RECON_STAMP="  \"adopted_at\": \"${RECON_ADOPTED_AT}\",\n  \"reconciled_from\": \"${RECON_FROM_REV}\",\n  \"reconciled_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\","
+else
+  RECON_TOOL="setup adopt"
+  RECON_STAMP="  \"adopted_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\","
+fi
 # fully_deployed is the ONLY field that may ever be read as "revision X is
 # completely deployed and verified on this machine". `revision` alone means
 # "baselined against X". Any unresolved row (drifted/missing content or a
 # missing submodule) forces false; future plan/apply code must honor this.
+# Re-observing live state can therefore never launder drifted/missing rows
+# into deployed ones: the mapping below is the same one fresh adoption uses.
 UNRESOLVED=$(( ${DEPLOY_COUNTS[drifted]:-0} + ${DEPLOY_COUNTS[sidecar-drifted]:-0} + ${DEPLOY_COUNTS[missing]:-0} + ${DEPLOY_COUNTS[sidecar-missing]:-0} + ${DEPLOY_COUNTS[submodule-missing]:-0} ))
 if (( UNRESOLVED == 0 )); then FULLY_JSON="true"; else FULLY_JSON="false"; fi
 IDENTITY=$(cat <<EOF
@@ -230,18 +298,18 @@ IDENTITY=$(cat <<EOF
   "status": "adopted",
   "fully_deployed": ${FULLY_JSON},
   "revision": "${DEPLOY_SHA}",
-  "fontset": ${FONTSET_JSON},
+${RECON_DEPLOYED_LINE}  "fontset": ${FONTSET_JSON},
   "via_nix": ${VIANIX_JSON},
   "home_root": "$(deploy_json_escape "$DEPLOY_HOME")",
   "xdg_config": "$(deploy_json_escape "$DEPLOY_XDG_CONFIG")",
-  "adopted_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "tool": "setup adopt",
+$(printf '%b' "$RECON_STAMP")
+  "tool": "${RECON_TOOL}",
   "manifest": "${DEPLOY_MANIFEST_NAME}",
   "manifest_sha256": "${MF_SHA}",
   "manifest_records": ${MF_COUNT},
   "legacy_evidence": "${DEPLOY_EVIDENCE_NAME}",
   "legacy_evidence_records": ${EV_COUNT},
-  "counts": $(counts_json)
+  "counts": $(counts_json)${RECON_LASTAPPLY_FRAG}
 }
 EOF
 )

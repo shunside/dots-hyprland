@@ -91,58 +91,30 @@ if ! deploy_plan_load_target "$TARGET_SHA"; then
   exit 2
 fi
 
-# Union of manifest paths and target payload paths, sorted for stable output.
-declare -A UNION_ALL=()
-p=""
-for p in "${!PLAN_M_STATUS[@]}"; do UNION_ALL[$p]=1; done
-for p in "${!PLAN_T_CLASS[@]}" "${!PLAN_T_SUB[@]}"; do UNION_ALL[$p]=1; done
+# Full fresh plan via the shared computation (identical to what apply
+# preflight decides on). Zero writes. (Guarded assignment: a refusal must
+# reach the explicit branches below, not trip `set -e` from setup.)
+compute_rc=0
+deploy_plan_compute "$STATE_DIR" || compute_rc=$?
+if (( compute_rc == 2 )); then
+  exit 2
+elif (( compute_rc != 0 )); then
+  echo "[$0]: plan computation failed" >&2
+  exit 1
+fi
+# Reassemble the exact historical output shape from the row arrays.
+# Index-based iteration: unquoted ${arr[@]} expansion would re-split rows
+# on IFS whitespace (tabs), corrupting every TSV line.
 PLAN_TSV=""
-sorted=()
-if (( ${#UNION_ALL[@]} > 0 )); then
-  while IFS= read -r p; do
-    [[ -z "$p" ]] && continue
-    sorted+=("$p")
-  done < <(printf '%s\n' "${!UNION_ALL[@]}" | LC_ALL=C sort)
-fi
 row=""
-for p in "${sorted[@]}"; do
-  row=$(deploy_plan_path "$p") || { echo "[$0]: decision failed for $p" >&2; exit 1; }
-  [[ -z "$row" ]] && continue  # Invisible by design (in neither universe).
-  PLAN_TSV+="${row}"$'\n'
+for ((i = 0; i < ${#DEPLOY_PLAN_ROWS[@]}; i++)); do
+  PLAN_TSV+="${DEPLOY_PLAN_ROWS[$i]}"$'\n'
 done
-# Strip the trailing newline: a leftover empty row would poison the
-# histogram below with an empty op key.
 PLAN_TSV="${PLAN_TSV%$'\n'}"
-
-# Weak legacy evidence: informational rows for every evidence path, with
-# overlap marked (manifest/target already carry the strong state).
-# Parsed with jq via deploy_plan_load_evidence; malformed evidence refuses
-# the plan rather than silently dropping rows.
 EVIDENCE_ROWS=""
-ev_src="${DEPLOY_XDG_CONFIG}/illogical-impulse/${DEPLOY_EVIDENCE_NAME}"
-if [[ -f "${STATE_DIR}/${DEPLOY_EVIDENCE_NAME}" ]]; then
-  ev_src="${STATE_DIR}/${DEPLOY_EVIDENCE_NAME}"
-fi
-if [[ -f "$ev_src" ]]; then
-  if ! deploy_plan_load_evidence "$ev_src"; then
-    exit 2
-  fi
-  for ev_path in ${PLAN_EV[@]+"${PLAN_EV[@]}"}; do
-    overlap="weak-only"
-    if [[ -n "${PLAN_M_STATUS[$ev_path]:-}" ]]; then overlap="also-in-manifest"; fi
-    if [[ -n "${PLAN_T_CLASS[$ev_path]:-}" || -n "${PLAN_T_SUB[$ev_path]:-}" ]]; then
-      if [[ "$overlap" == "weak-only" ]]; then overlap="also-in-target"; else overlap="also-in-manifest+target"; fi
-    fi
-    ev_disk=""; ev_live="unknown"
-    if ev_disk=$(deploy_map_home "$ev_path" 2>/dev/null); then
-      ev_live=$(deploy_plan_observe "$ev_disk")
-    fi
-    ev_blob="-"
-    if [[ -n "${PLAN_T_BLOB[$ev_path]:-}" ]]; then ev_blob="${PLAN_T_BLOB[$ev_path]}"; fi
-    printf -v ev_row 'legacy\t-\t%s\t-\t-\t%s\t%s\t%s;informational-only-never-an-op\n' "$ev_path" "$ev_blob" "$ev_live" "$overlap"
-    EVIDENCE_ROWS+="$ev_row"
-  done
-fi
+for ((i = 0; i < ${#DEPLOY_PLAN_EVID[@]}; i++)); do
+  EVIDENCE_ROWS+="${DEPLOY_PLAN_EVID[$i]}"$'\n'
+done
 EVIDENCE_ROWS="${EVIDENCE_ROWS%$'\n'}"
 
 printf '# deploy-plan\tbaseline=%s\ttarget=%s\n' "$PLAN_BASE_REV" "$TARGET_SHA"
@@ -170,7 +142,7 @@ while IFS=$'\t' read -r op _c _p _b _d _t _l _x; do
   case "$op" in \#*) continue;; esac
   ocounts[$op]=$(( ${ocounts[$op]:-0} + 1 ))
 done <<<"${PLAN_TSV}${EVIDENCE_ROWS}"
-order=(update add delete-stale sidecar-new unchanged converged gone conflict-drift conflict-removed delete-blocked drift-unchanged drift-update drift-moved drift-removed missing-unchanged appeared class-changed retired type-changed preserved user-absent submodule-ok submodule-diverged submodule-update-available submodule-missing legacy error)
+order=(update add delete-stale sidecar-new unchanged converged gone conflict-drift conflict-removed delete-blocked drift-unchanged drift-update drift-moved drift-removed missing-unchanged add-evidence appeared class-changed retired type-changed preserved user-absent submodule-ok submodule-unverified submodule-diverged submodule-drifted submodule-update-available submodule-missing sidecar-pending legacy error)
 rollup_noop=0; rollup_write=0; rollup_decide=0; rollup_info=0
 for op in "${order[@]}"; do
   n=${ocounts[$op]:-0}
@@ -178,7 +150,7 @@ for op in "${order[@]}"; do
   case "$op" in
     unchanged|converged|gone) rollup_noop=$((rollup_noop + n));;
     update|add|delete-stale|sidecar-new) rollup_write=$((rollup_write + n));;
-    preserved|user-absent|submodule-ok|retired|legacy) rollup_info=$((rollup_info + n));;
+    preserved|user-absent|submodule-ok|submodule-unverified|retired|sidecar-pending|legacy) rollup_info=$((rollup_info + n));;
     *) rollup_decide=$((rollup_decide + n));;
   esac
 done
@@ -189,7 +161,7 @@ for op in "${order[@]}"; do
   (( n == 0 )) && continue
   printf '    %-26s %s\n' "$op" "$n"
 done
-for op in update add delete-stale sidecar-new conflict-drift conflict-removed delete-blocked drift-unchanged drift-update drift-moved drift-removed missing-unchanged appeared class-changed retired type-changed submodule-diverged submodule-update-available submodule-missing legacy error; do
+for op in update add delete-stale sidecar-new conflict-drift conflict-removed delete-blocked drift-unchanged drift-update drift-moved drift-removed missing-unchanged add-evidence appeared class-changed retired type-changed submodule-diverged submodule-drifted submodule-update-available submodule-missing submodule-unverified sidecar-pending legacy error; do
   n=${ocounts[$op]:-0}
   (( n == 0 )) && continue
   echo "  --- ${op} (${n}) ---"

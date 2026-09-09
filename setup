@@ -36,6 +36,8 @@ Subcommands:
 
   adopt          (Experimental) Read-only adoption dry-run for safe updates.
   plan           (Experimental) Read-only update planner for safe updates.
+  decide         (Experimental) Record durable update decisions.
+  apply          (Experimental) Write-capable safe deployment.
 
   virtmon        (For dev only) Create virtual monitors for testing multi-monitors.
   checkdeps      (For dev only) Check whether pkgs exist in AUR or repos of Arch.
@@ -52,7 +54,7 @@ case $1 in
   # Global help
   ""|help|--help|-h)showhelp_global;exit;;
   # Correct subcommand
-  install|uninstall|exp-update|exp-merge|adopt|plan|resetfirstrun|checkdeps|virtmon)
+  install|uninstall|exp-update|exp-merge|adopt|plan|decide|apply|resetfirstrun|checkdeps|virtmon)
     SUBCMD_NAME=$1
     SUBCMD_DIR=./sdata/subcmd-$1
     shift;;

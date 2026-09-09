@@ -90,22 +90,38 @@ function deploy_manifest_build(){
     local out_disk="$disk" out_detail="$detail"
     if [[ "$kind" == "submodule" ]]; then
       # Disk holds the observed submodule HEAD (or null), never content.
+      # Fingerprint (self-anchored change detection, best effort here) is
+      # recorded when computable; absence just means legacy-style rows.
       out_disk="null"
       out_detail="$detail"
+      local fp_now=""
       if [[ "$state" == "submodule-present" ]]; then
         local hrel_abs sub_head
         if hrel_abs=$(deploy_map_home "$path" 2>/dev/null) && [[ -d "$hrel_abs" && ! -L "$hrel_abs" ]]; then
           if sub_head=$(git -C "$hrel_abs" rev-parse HEAD 2>/dev/null); then
             out_disk="\"$sub_head\""
           fi
+          if fp_now=$(deploy_submodule_fingerprint "$hrel_abs" 2>/dev/null); then
+            :
+          else
+            out_detail="${out_detail};fingerprint-unavailable"
+          fi
         fi
       fi
-      printf '{"path":"%s","kind":"submodule","class":"%s","status":"%s","blob":"%s","disk":%s,"rev":"%s","detail":"%s"}\n' \
+      printf '{"path":"%s","kind":"submodule","class":"%s","status":"%s","blob":"%s","disk":%s,"rev":"%s","detail":"%s"' \
         "$(deploy_json_escape "$path")" "$class" "$status" "$blob" "$out_disk" "$rev" "$(deploy_json_escape "$out_detail")"
+      if [[ -n "$fp_now" ]]; then
+        printf ',"fingerprint":"%s"}\n' "$fp_now"
+      else
+        printf '}\n'
+      fi
       continue
     fi
     if [[ "$disk" == "-" ]]; then out_disk="null"; else out_disk="\"$disk\""; fi
-    if [[ "$detail" == "-" ]]; then out_detail=""; fi
+    # Quiet details stay "-" (never ""): `read` with an all-whitespace IFS
+    # silently skips empty middle fields, so the manifest must not contain
+    # any. Readers still tolerate legacy "" details.
+    if [[ "$detail" == "-" || -z "$detail" ]]; then out_detail="-"; fi
     printf '{"path":"%s","kind":"%s","class":"%s","status":"%s","blob":"%s","disk":%s,"rev":"%s","detail":"%s"}\n' \
       "$(deploy_json_escape "$path")" "$kind" "$class" "$status" "$blob" "$out_disk" "$rev" "$(deploy_json_escape "$out_detail")"
   done <<<"$tsv"
@@ -263,12 +279,69 @@ function deploy_verify_files(){
 # claim lives only in the identity's `fully_deployed` field, and future
 # planning code must treat a revision as fully deployed ONLY when
 # `fully_deployed` is true — `revision` alone means "baselined against".
-# Exit: 0 adoption-complete; 2 absent or incomplete; 1 corrupt or unreadable.
+# Transaction awareness (Slice 3B): an open journal or live lock is never
+# mistaken for steady state. Verdicts:
+#   in-progress:<id>      lock held by a live pid (rc 2)
+#   incomplete:<id>        open transaction, snapshot present (rc 2);
+#                          resume/abort (not plain apply) decide next
+#   corrupt                torn/unparseable state incl. missing snapshot
+#                          for an open transaction (rc 1)
+#   absent / incomplete:manifest-without-identity / corrupt:* / 
+#   adoption-complete      steady-state verdicts as before (rc 2/2/1/0)
+# A stale (dead-pid) lock alone never changes the verdict; it is reported
+# as a note line. Only --break-lock clears it, and clearing never resolves
+# transaction state.
 function deploy_status(){
   local sd="$1"
   local id="$sd/$DEPLOY_IDENTITY_NAME" mf="$sd/$DEPLOY_MANIFEST_NAME" ev="$sd/$DEPLOY_EVIDENCE_NAME"
+  local lock="$sd/apply.lock"
+  if [[ -f "$lock" ]]; then
+    local lpid lid
+    lpid=$(awk '{print $1}' "$lock" 2>/dev/null || echo "?")
+    lid=$(awk '{print $2}' "$lock" 2>/dev/null || echo "?")
+    if [[ "$lpid" =~ ^[0-9]+$ ]] && kill -0 "$lpid" 2>/dev/null; then
+      echo "state-dir: $sd"
+      echo "verdict: in-progress:$lid"
+      return 2
+    fi
+  fi
+  local openj=""
+  local jf jid
+  for jf in "$sd/applies"/*/journal.jsonl; do
+    [[ -f "$jf" ]] || continue
+    # Only a complete outcome (or an abort) closes the transaction. A
+    # failed completion marker leaves the transaction open for
+    # resume/abort; it must never read as steady state.
+    if { grep -q '"type":"completed"' "$jf" 2>/dev/null && grep -q '"outcome":"complete"' "$jf" 2>/dev/null; } || grep -q '"type":"aborted"' "$jf" 2>/dev/null; then
+      continue
+    fi
+    jid=$(basename "$(dirname "$jf")")
+    if [[ -z "$openj" ]]; then
+      openj="$jid"
+    else
+      echo "state-dir: $sd"
+      echo "verdict: corrupt:multiple-open-transactions"
+      return 1
+    fi
+  done
+  if [[ -n "$openj" ]]; then
+    if [[ ! -d "$sd/snapshots/$openj" ]]; then
+      echo "state-dir: $sd"
+      echo "verdict: corrupt:transaction-without-snapshot:$openj"
+      return 1
+    fi
+    echo "state-dir: $sd"
+    if [[ -f "$sd/snapshots/$openj/manifest.jsonl" ]] && ! cmp -s "$sd/snapshots/$openj/manifest.jsonl" "$mf" 2>/dev/null; then
+      echo "note: manifest advanced past snapshot (crash during/after publication likely)"
+    fi
+    echo "verdict: incomplete:$openj"
+    return 2
+  fi
   if [[ ! -f "$id" && ! -f "$mf" && ! -f "$ev" ]]; then
     echo "state-dir: $sd"
+    if [[ -f "$lock" ]]; then
+      echo "note: stale lock present with no transaction history"
+    fi
     echo "verdict: absent"
     return 2
   fi
@@ -288,6 +361,9 @@ function deploy_status(){
   fi
   if deploy_verify_files "$sd" 2>/dev/null; then
     echo "checks: manifest-sha256=ok record-counts=ok"
+    if [[ -f "$lock" ]]; then
+      echo "note: stale lock present; no open transaction (break-lock to clear)"
+    fi
     echo "verdict: adoption-complete"
     return 0
   fi

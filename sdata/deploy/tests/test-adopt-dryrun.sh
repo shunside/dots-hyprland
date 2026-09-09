@@ -202,5 +202,23 @@ REFLOG_AFTER=$(git -C "$R" log -g --format=%H HEAD | head -n 1)
 if cmp -s "$HOME_SNAP_BEFORE" "$T/home.snap.after"; then pass "home tree identical"; else fail "home tree identical"; fi
 chmod 644 "$H/.config/app/noperm.conf"
 
+echo "--- exact-file user override beats parent managed (generated-file pattern) ---"
+printf 'static placeholder\n' > "$R/dots/.config/app/generated.ini"
+printf 'live generated content\n' > "$H/.config/app/generated.ini"
+printf 'absent seed\n' > "$R/dots/.config/app/genabsent.ini"
+cat >> "$R/sdata/deploy/ownership.conf" <<'EOF'
+user dots/.config/app/generated.ini .config/app/generated.ini
+user dots/.config/app/genabsent.ini .config/app/genabsent.ini
+EOF
+git -C "$R" add -A
+git -C "$R" -c user.email="fixture@example" -c user.name="fixture" -c commit.gpgsign=false commit -qm "exact-file user overrides"
+REV_THREE=$(git -C "$R" rev-parse HEAD)
+deploy_load_registry "$REV_THREE" || fail "load registry with overrides"
+TSV_GEN=$(deploy_classify "$REV_THREE")
+expect_row "$TSV_GEN" preserved .config/app/generated.ini
+expect_row "$TSV_GEN" user-absent .config/app/genabsent.ini
+expect_count "$TSV_GEN" preserved 4
+expect_count "$TSV_GEN" user-absent 2
+
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" == 0 ]]
