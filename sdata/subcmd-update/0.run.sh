@@ -64,8 +64,10 @@ APPLY_DECISIONS_FILE="$APPLY_SD/$DEPLOY_DECISIONS_NAME"
 export APPLY_SD APPLY_DECISIONS_FILE
 
 # Echo-back suffix so copy-pasted follow-ups reuse non-default inputs.
+# UPDATE_PIN_SUFFIX additionally pins the discovered target commit for
+# commands that must evaluate the identical rows (plan, decide --set).
 UPDATE_SUFFIX=""
-if [[ "${DEPLOY_AT:-HEAD}" != "HEAD" ]]; then
+if [[ "${DEPLOY_UPDATE_AT_GIVEN:-false}" == true ]]; then
   UPDATE_SUFFIX+=" --at $(printf '%q' "$DEPLOY_AT")"
 fi
 if [[ -n "${DEPLOY_STATE_DIR:-}" ]]; then
@@ -148,6 +150,69 @@ if (( UPDATE_STATUS_RC != 0 )); then
   esac
 fi
 
+# --- Target discovery (read-only network at most; never touches home/state).
+# Bare `update` means "bring this machine to the latest normal revision
+# of its configured fork": resolve the current branch's tracking branch,
+# fetch it (remote-tracking refs only — the working branch, index, and
+# worktree are never modified), and pin the fetched commit before any
+# gate runs, so later remote movement cannot change the target mid-run.
+# An explicit --at keeps the historical fully-local behavior and never
+# fetches. plan/decide/apply are untouched and stay local-only.
+UPDATE_DISCOVERED_FROM=""
+UPDATE_TARGET_WHENCE=""
+UPDATE_PIN_SUFFIX="$UPDATE_SUFFIX"
+if [[ "${DEPLOY_UPDATE_AT_GIVEN:-false}" != true ]]; then
+  UPDATE_UPSTREAM=""
+  UPDATE_UPSTREAM=$(git -C "$REPO_ROOT" rev-parse --symbolic-full-name "@{u}" 2>/dev/null || true)
+  if [[ "$UPDATE_UPSTREAM" == refs/remotes/* ]]; then
+    UPDATE_TRACK="${UPDATE_UPSTREAM#refs/remotes/}"
+    UPDATE_REMOTE=""
+    UPDATE_BRANCH=""
+    while IFS= read -r UPDATE_R; do
+      [[ -z "$UPDATE_R" ]] && continue
+      case "$UPDATE_TRACK" in
+        "$UPDATE_R"/*) UPDATE_REMOTE="$UPDATE_R"; UPDATE_BRANCH="${UPDATE_TRACK:$((${#UPDATE_R} + 1))}"; break;;
+      esac
+    done < <(git -C "$REPO_ROOT" remote 2>/dev/null || true)
+    if [[ -z "$UPDATE_REMOTE" || -z "$UPDATE_BRANCH" ]]; then
+      echo "${STY_FAINT}note: tracking ref $UPDATE_UPSTREAM matches no configured remote; using the local checkout.${STY_RST}"
+    else
+      UPDATE_FETCH_ERR=""
+      if ! UPDATE_FETCH_ERR=$(git -C "$REPO_ROOT" fetch --quiet -- "$UPDATE_REMOTE" "$UPDATE_BRANCH" 2>&1); then
+        echo -e "${STY_RED}x${STY_RST} Update failed: could not fetch $UPDATE_REMOTE/$UPDATE_BRANCH." >&2
+        [[ -n "$UPDATE_FETCH_ERR" ]] && echo "  $(head -n 1 <<<"$UPDATE_FETCH_ERR")" >&2
+        echo "  Check the network or remote access, then re-run: $0 update${UPDATE_SUFFIX}" >&2
+        echo "  For a fully local deploy of the current checkout: $0 update --at HEAD${UPDATE_SUFFIX}" >&2
+        exit 1
+      fi
+      UPDATE_RESOLVED=""
+      UPDATE_RESOLVED=$(git -C "$REPO_ROOT" rev-parse --verify "$UPDATE_REMOTE/$UPDATE_BRANCH^{commit}" 2>/dev/null || true)
+      if [[ ! "$UPDATE_RESOLVED" =~ ^[0-9a-f]{40}$ ]]; then
+        echo -e "${STY_RED}x${STY_RST} Update failed: remote tracking ref $UPDATE_REMOTE/$UPDATE_BRANCH did not resolve after fetching." >&2
+        exit 1
+      fi
+      DEPLOY_AT="$UPDATE_RESOLVED"
+      UPDATE_DISCOVERED_FROM="$UPDATE_REMOTE/$UPDATE_BRANCH"
+      UPDATE_TARGET_WHENCE=" (latest on $UPDATE_REMOTE/$UPDATE_BRANCH)"
+      UPDATE_PIN_SUFFIX+=" --at $UPDATE_RESOLVED"
+    fi
+  elif [[ "$UPDATE_UPSTREAM" == refs/heads/* ]]; then
+    UPDATE_LOCAL_TRACK="${UPDATE_UPSTREAM#refs/heads/}"
+    UPDATE_RESOLVED=""
+    UPDATE_RESOLVED=$(git -C "$REPO_ROOT" rev-parse --verify "${UPDATE_UPSTREAM}^{commit}" 2>/dev/null || true)
+    if [[ ! "$UPDATE_RESOLVED" =~ ^[0-9a-f]{40}$ ]]; then
+      echo -e "${STY_RED}x${STY_RST} Update failed: tracked local branch $UPDATE_LOCAL_TRACK did not resolve." >&2
+      exit 1
+    fi
+    DEPLOY_AT="$UPDATE_RESOLVED"
+    UPDATE_DISCOVERED_FROM="local $UPDATE_LOCAL_TRACK"
+    UPDATE_PIN_SUFFIX+=" --at $UPDATE_RESOLVED"
+    echo "${STY_FAINT}note: tracking local branch $UPDATE_LOCAL_TRACK (no remote involved).${STY_RST}"
+  else
+    echo "${STY_FAINT}note: no remote tracking branch configured; using the local checkout. Pass --at explicitly to pin a revision, or set an upstream to track the fork.${STY_RST}"
+  fi
+fi
+
 # --- Shared gates: state, target, inputs, plan, decisions, preflight. ---
 # Identical evaluation to every other caller; pure except for reads.
 UPDATE_PREP_RC=0
@@ -159,7 +224,7 @@ if (( UPDATE_PREP_RC == 1 )); then
 elif (( UPDATE_PREP_RC != 0 )); then
   if (( ${#APPLY_ERRORS[@]} > 0 )); then
     echo -e "${STY_YELLOW}!${STY_RST} Update blocked: the plan contains ${#APPLY_ERRORS[@]} error row(s); nothing was changed." >&2
-    echo "  Next step: inspect with $0 plan${UPDATE_SUFFIX}" >&2
+    echo "  Next step: inspect with $0 plan${UPDATE_PIN_SUFFIX}" >&2
     echo "  Fix the underlying cause, then re-run: $0 update${UPDATE_SUFFIX}" >&2
     exit 2
   fi
@@ -172,7 +237,7 @@ elif (( UPDATE_PREP_RC != 0 )); then
       UPDATE_S_REST="${UPDATE_ROW#*|}"
       echo "    ${UPDATE_S_OP}  ${UPDATE_S_REST%%|*}" >&2
     done
-    echo "  Details: $0 plan${UPDATE_SUFFIX} — then re-run: $0 update${UPDATE_SUFFIX}" >&2
+    echo "  Details: $0 plan${UPDATE_PIN_SUFFIX} — then re-run: $0 update${UPDATE_SUFFIX}" >&2
     exit 2
   fi
   if (( ${#APPLY_UNDECIDED[@]} > 0 )); then
@@ -194,9 +259,9 @@ elif (( UPDATE_PREP_RC != 0 )); then
       fi
     done
     if (( ${#APPLY_UNDECIDED[@]} > 12 )); then
-      echo "    ...and $(( ${#APPLY_UNDECIDED[@]} - 12 )) more (full list: $0 plan${UPDATE_SUFFIX})" >&2
+      echo "    ...and $(( ${#APPLY_UNDECIDED[@]} - 12 )) more (full list: $0 plan${UPDATE_PIN_SUFFIX})" >&2
     fi
-    echo "  Next step: record choices with $0 decide --set PATH=CHOICE [--set ...]${UPDATE_SUFFIX}" >&2
+    echo "  Next step: record choices with $0 decide --set PATH=CHOICE [--set ...]${UPDATE_PIN_SUFFIX}" >&2
     echo "  (each path's valid choices are listed by: $0 decide --help)" >&2
     echo "  One-shot alternative: $0 update --resolve PATH:CHOICE [...]${UPDATE_SUFFIX}" >&2
     echo "  Saved choices: $0 decide --list${UPDATE_SUFFIX}" >&2
@@ -271,7 +336,15 @@ UPDATE_KEEP_TXT=""
 if (( UPDATE_N_KEEP > 0 )); then
   UPDATE_KEEP_TXT=" · ${UPDATE_N_KEEP} kept as-is by your decisions"
 fi
-echo -e "Updating ${UPDATE_BASE_SHORT} ${STY_FAINT}->${STY_RST} ${STY_BOLD}${UPDATE_TARGET_SHORT}${STY_RST}"
+echo -e "Updating ${UPDATE_BASE_SHORT} ${STY_FAINT}->${STY_RST} ${STY_BOLD}${UPDATE_TARGET_SHORT}${STY_RST}${UPDATE_TARGET_WHENCE:-}"
+# Local-only commits never ride along implicitly: name them instead.
+if [[ -n "${UPDATE_DISCOVERED_FROM:-}" && "$UPDATE_DISCOVERED_FROM" != local* ]]; then
+  UPDATE_AHEAD=0
+  UPDATE_AHEAD=$(git -C "$REPO_ROOT" rev-list --count "$APPLY_TARGET..HEAD" 2>/dev/null || echo 0)
+  if [[ "$UPDATE_AHEAD" =~ ^[0-9]+$ ]] && (( UPDATE_AHEAD > 0 )); then
+    echo -e "${STY_FAINT}note: local branch holds $UPDATE_AHEAD commit(s) not on $UPDATE_DISCOVERED_FROM; deploying the remote tip, local work untouched.${STY_RST}"
+  fi
+fi
 echo "${UPDATE_N_WRITE} files will change: ${UPDATE_N_UPD} updates, ${UPDATE_N_INS} new, ${UPDATE_N_DEL} deletions, ${UPDATE_N_SIDE} sidecars${UPDATE_KEEP_TXT}"
 
 if (( UPDATE_N_WRITE == 0 )); then

@@ -4,7 +4,14 @@
 showhelp(){
 echo -e "Syntax: $0 update [OPTIONS]...
 
-Update this machine to the fork target revision (default: HEAD).
+Update this machine to the fork target revision.
+
+Without --at, update first asks the current branch's configured remote
+for the latest revision (fetch only: your checkout, working branch, and
+local commits are never modified) and deploys that exact commit, so a
+plain `update` tracks the fork. Pass --at for a fully local, offline
+deploy of whatever the checkout already has; explicit targets never
+trigger network access.
 
 Runs the normal clean update path end to end: summarizes what will
 change, evaluates every deployment gate (adoption state, decisions,
@@ -16,10 +23,14 @@ is needed, and tells you exactly which command to run next.
 The lower-level plan/decide/apply commands stay available for
 inspection and recovery; update never bypasses their safety model.
 
-  --at SPEC      Target revision (default: HEAD). Local only, never fetches.
+  --at SPEC      Target revision (default: latest on the configured
+                 remote). An explicit --at is always local-only and never
+                 fetches; use it (e.g. --at HEAD) for offline deploys.
                  Pull or switch branches yourself first if needed.
   --dry-run      Show what would change and evaluate all gates without
-                 applying anything.
+                 applying anything. Follows the same target discovery as
+                 a real run (including the remote check); only --at
+                 makes it fully offline.
   -h, --help     Show this help message.
 
 Exit codes:
@@ -47,7 +58,9 @@ echo -e "Syntax: $0 update [OPTIONS]... (advanced reference)
 
 Same update flow as \`$0 update --help\`, with every control listed.
 
-  --at SPEC      Target revision (default: HEAD). Local only, never fetches.
+  --at SPEC      Target revision explicitly given: always local-only,
+                 never fetches. Omit --at to track the branch's
+                 configured remote instead (see above).
   --home DIR     Home root (default: \$HOME). Must match adopted home_root.
   --state-dir D  Adoption state directory (default: own-home standard
                  location; required with a foreign --home).
@@ -56,13 +69,21 @@ Same update flow as \`$0 update --help\`, with every control listed.
   --resolve P:C  Ephemeral decision (choice C for path P, validated
                  against its fresh operation). Repeatable, never persisted.
   --dry-run      Show what would change and evaluate all gates without
-                 applying anything.
+                 applying anything. Follows the same target discovery as
+                 a real run; only --at makes it fully offline.
   --verbose      Stream the full technical report (preflight internals,
                  fingerprints, transaction detail) instead of the concise
                  user summary. Blocked and failed paths always name the
                  technical detail needed to resolve them.
   --help-all     Show this advanced reference.
   -h, --help     Show the common help message.
+
+Target discovery details: remote and branch come from the current
+branch's tracking configuration (no hardcoded remote). Fetching updates
+remote-tracking refs only; the working branch and worktree are never
+modified. With no tracking branch configured, update uses the local
+checkout and says so. If the fetch itself fails, update stops before
+any deployment write. --at is fully local in all cases.
 
 Requires: jq (for reading deployment state).
 "
@@ -76,6 +97,7 @@ para=$(getopt \
 [ $? != 0 ] && echo "$0: Error when getopt, please recheck parameters." && exit 1
 
 DEPLOY_AT="HEAD"
+DEPLOY_UPDATE_AT_GIVEN=false
 DEPLOY_HOME_DIR="$HOME"
 DEPLOY_STATE_DIR=""
 DEPLOY_APPLY_FONTSET=""
@@ -90,7 +112,7 @@ while true ; do
   case "$1" in
     -h|--help) showhelp;exit;;
     --help-all) showhelp_all;exit;;
-    --at) DEPLOY_AT="$2";shift 2;;
+    --at) DEPLOY_AT="$2"; DEPLOY_UPDATE_AT_GIVEN=true;shift 2;;
     --home) DEPLOY_HOME_DIR="$2";shift 2;;
     --state-dir) DEPLOY_STATE_DIR="$2";shift 2;;
     --fontset) DEPLOY_APPLY_FONTSET="$2";DEPLOY_APPLY_FONTSET_SET=true;shift 2;;

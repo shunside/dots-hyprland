@@ -88,7 +88,9 @@ mkdir -p "$T/fhome/.config/quickshell/ii/modules/common/widgets/shapes"
   && pass "unadopted refused via launcher" || fail "unadopted refused via launcher"
 (cd "$SRC" && ./setup adopt --apply --at HEAD --home "$T/fhome" --state-dir "$T/fstate" </dev/null > /dev/null 2>&1)
 [[ $? == 0 ]] && pass "fixture adopt exits 0" || fail "fixture adopt exits 0"
-(cd "$T/elsewhere" && impulse update --dry-run --home "$T/fhome" --state-dir "$T/fstate" </dev/null > /tmp/lc-dry.out 2>&1)
+# Explicit --at keeps this hermetic: the default path would fetch the
+# real repo's configured remote over the network.
+(cd "$T/elsewhere" && impulse update --dry-run --at HEAD --home "$T/fhome" --state-dir "$T/fstate" </dev/null > /tmp/lc-dry.out 2>&1)
 [[ $? == 2 ]] && grep -q "need your decisions" /tmp/lc-dry.out \
   && pass "undecided refused via launcher" || fail "undecided refused via launcher"
 [[ ! -e "$T/fstate/applies" && ! -e "$T/fstate/apply.lock" ]] \
