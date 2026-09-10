@@ -52,8 +52,22 @@ Keyboard/Input, in Settings → Keyboard:
 ```
 
 `dots/` mirrors `$HOME`; machine differences are parameterized, not hardcoded.
-There is currently no updater I trust enough to call an updater, and that's
-likely the next subsystem to get built properly.
+
+## Updates
+
+A machine this repo has adopted stays synchronized with it — no reinstalling:
+
+```sh
+./setup update            # apply the latest fork revision
+./setup update --dry-run  # preview what would change, change nothing
+./setup                   # the short version: what you can do from here
+```
+
+`update` only touches fork-managed files. User- and runtime-owned state
+is left alone, and anything locally different that needs a human call
+stops and asks (via `decide`) instead of being overwritten quietly.
+`./setup commands` lists everything else, including the lower-level
+deployment and recovery tools.
 
 Arch is the environment actually being tested. Other distros exist as
 best-effort overlays.

@@ -4,7 +4,7 @@
 showhelp(){
 echo -e "Syntax: $0 apply [OPTIONS]...
 
-Write-capable deployment (Slice 3B). Applies a fully gated plan to the
+Write-capable deployment. Applies a fully gated plan to the
 live filesystem: snapshot-first, journaled, idempotent per-path
 operations, atomic end publication. Refuses unless every gate passes:
 complete adoption state, classifiable target, valid decisions for every
@@ -13,7 +13,9 @@ transaction. Fail-fast: the first unexpected failure stops all further
 mutation and leaves an explicit incomplete transaction.
 
 Default mode performs the apply. --preflight only evaluates gates and
-prints what would happen (zero writes).
+prints what would happen (zero writes). Most users should prefer
+`setup update`, which drives this same machinery with friendlier
+reporting; reach for apply directly for inspection and recovery.
 
   --at SPEC      Target revision (default: HEAD). Local only, never fetches.
   --home DIR     Home root (default: \$HOME). Must match adopted home_root.
