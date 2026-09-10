@@ -20,6 +20,13 @@ STY_BLINK='\e[5m'
 STY_INVERT='\e[7m'
 STY_RST='\e[00m'
 
+# Global launcher for the setup system (symlinked into XDG_BIN_HOME by the
+# install flow, so the normal workflow runs from any directory).
+# Short, project-scoped, and collision-checked: `ii` would shadow the
+# suckless IRC client shipped on Arch, and `end4` would misattribute
+# fork-specific tooling to upstream.
+SETUP_GLOBAL_CMD="impulse"
+
 # Used by register_temp_file()
 declare -a TEMP_FILES_TO_CLEANUP=()
 

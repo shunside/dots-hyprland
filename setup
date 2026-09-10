@@ -1,5 +1,27 @@
 #!/usr/bin/env bash
-cd "$(dirname "$0")"
+# Locate the repository directory robustly: resolve a possible symlink
+# chain first (the global launcher on PATH is a symlink into the repo),
+# so this command works from any working directory. Direct `./setup`
+# invocation behaves exactly as before.
+SETUP_SELF="$0"
+SETUP_DEPTH=0
+while [[ -L "$SETUP_SELF" && "$SETUP_DEPTH" -lt 20 ]]; do
+  SETUP_LINK_DIR="$(cd -P "$(dirname "$SETUP_SELF")" 2>/dev/null && pwd)" || break
+  SETUP_TARGET="$(readlink "$SETUP_SELF" 2>/dev/null)" || break
+  case "$SETUP_TARGET" in
+    /*) SETUP_SELF="$SETUP_TARGET";;
+    *) SETUP_SELF="$SETUP_LINK_DIR/$SETUP_TARGET";;
+  esac
+  SETUP_DEPTH=$((SETUP_DEPTH + 1))
+done
+cd -P "$(dirname "$SETUP_SELF")" 2>/dev/null || { echo "[$0]: cannot locate repository directory" >&2; exit 1; }
+# Display name for help and examples: the plain name users typed.
+# Unchanged for direct `./setup` use.
+case "$(basename -- "$0")" in
+  setup) SETUP_CMD_NAME="./setup";;
+  *) SETUP_CMD_NAME="$(basename -- "$0")";;
+esac
+export SETUP_CMD_NAME
 # Use REPO_ROOT instead of base - when scripts are sourced they do not need export to inherit vars
 REPO_ROOT="$(pwd)"
 source ./sdata/lib/environment-variables.sh
@@ -23,12 +45,12 @@ showhelp_global(){
 printf "${STY_BOLD}illogical-impulse setup${STY_RST}
 ${STY_FAINT}Fork-managed workstation config. Most days, one command is enough.${STY_RST}
 
-  ${STY_BOLD}$0 update${STY_RST}               Bring this machine to the latest fork revision.
-  ${STY_BOLD}$0 update --dry-run${STY_RST}    Preview what an update would change.
+  ${STY_BOLD}${SETUP_CMD_NAME} update${STY_RST}               Bring this machine to the latest fork revision.
+  ${STY_BOLD}${SETUP_CMD_NAME} update --dry-run${STY_RST}    Preview what an update would change.
 
-  $0 install              First-time install, or repair this machine.
-  $0 commands             Every command, grouped by purpose.
-  $0 <command> --help     Flags and examples for one command.
+  ${SETUP_CMD_NAME} install              First-time install, or repair this machine.
+  ${SETUP_CMD_NAME} commands             Every command, grouped by purpose.
+  ${SETUP_CMD_NAME} <command> --help     Flags and examples for one command.
 
 ${STY_FAINT}Docs: https://ii.clsty.link${STY_RST}
 "

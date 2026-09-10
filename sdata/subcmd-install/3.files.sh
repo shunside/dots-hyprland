@@ -3,6 +3,8 @@
 printf "${STY_CYAN}[$0]: 3. Copying config files\n${STY_RST}"
 
 # shellcheck shell=bash
+# shellcheck source=../lib/setup-launcher.sh
+source sdata/lib/setup-launcher.sh
 
 function warning_overwrite(){
   printf "${STY_YELLOW}"
@@ -232,6 +234,10 @@ fi
 
 v gen_firstrun
 v dedup_and_sort_listfile "${INSTALLED_LISTFILE}" "${INSTALLED_LISTFILE}"
+
+# Global `impulse` launcher so the setup system runs from any directory.
+showfun setup_launcher_install
+v setup_launcher_install
 
 # Prevent hyprland from not fully loaded
 sleep 1

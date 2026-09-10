@@ -106,6 +106,12 @@ function deletion_prompt(){
 
 deletion_prompt "${INSTALLED_LISTFILE}"
 
+# Global setup launcher (installed by the files step): remove it only when
+# it actually points into this repository, never a foreign occupant.
+# shellcheck source=../lib/setup-launcher.sh
+source sdata/lib/setup-launcher.sh
+x setup_launcher_remove
+
 empty_dir_listfile=$(mktemp)
 scan_paths=(${XDG_CONFIG_HOME} "${XDG_DATA_HOME}"/konsole)
 for dir in "${scan_paths[@]}"; do

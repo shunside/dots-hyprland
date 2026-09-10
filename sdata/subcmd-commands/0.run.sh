@@ -12,7 +12,7 @@
 
 echo -e "${STY_BOLD}Everyday:${STY_RST}
   update         Update this machine to the fork target revision.
-                 Example: $0 update
+                 Example: ${SETUP_CMD_NAME:-$0} update
   install        (Re)Install illogical-impulse (first-time setup or repair).
 
 ${STY_BOLD}Update control (advanced):${STY_RST}
@@ -41,7 +41,7 @@ ${STY_BOLD}Meta:${STY_RST}
   help           Show the concise landing screen (same as bare \`$0\`).
   commands       Show this inventory.
 
-Details per command: $0 <subcommand> -h
+Details per command: ${SETUP_CMD_NAME:-$0} <subcommand> -h
 ${STY_FAINT}Note: the old ./install.sh, ./update.sh, and ./uninstall.sh
 are now ./setup install, ./setup exp-update, and ./setup uninstall.${STY_RST}
 "
