@@ -219,6 +219,68 @@ fi
 grep -q "^✓ Already up to date at " /tmp/sum-f.out && [[ "$(grep -c '^Updating ' /tmp/sum-f.out)" == "0" ]] \
   && pass "F steady verdict is a single line" || fail "F steady verdict is a single line"
 
+echo "--- G: cross-version handoff converges the checkout ---"
+# Exact field shape: the checkout's own updater predates checkout
+# convergence (hands off silently, then exits), while the pinned target
+# implementation skips advancement for explicitly pinned runs. Only the
+# handoff-inner path may advance here.
+OLD_REV="a2a890be"
+if ! git -C "$SRC" cat-file -e "${OLD_REV}^{commit}" 2>/dev/null; then
+  echo "SKIP: outer revision $OLD_REV not present"
+else
+  G2U="$T/g-upstream.git"
+  git init -q --bare "$G2U"
+  git --git-dir="$G2U" symbolic-ref HEAD refs/heads/main
+  GR="$T/g-origin"
+  git init -q "$GR"
+  git -C "$GR" checkout -qb main 2>/dev/null || true
+  git -C "$GR" config user.email "fixture@example"
+  git -C "$GR" config user.name "fixture"
+  git -C "$GR" config commit.gpgsign false
+  git -C "$SRC" archive "$OLD_REV" setup sdata | tar -x -C "$GR"
+  mkdir -p "$GR/dots/.config/app"
+  printf 'managed dots/.config/app .config/app\n' > "$GR/sdata/deploy/ownership.conf"
+  printf 'same\n' > "$GR/dots/.config/app/keep.conf"
+  printf 'v1\n' > "$GR/dots/.config/app/upd.conf"
+  git -C "$GR" add -A
+  git -C "$GR" "${GCOMMIT[@]}" "stale era base"
+  GBASE=$(git -C "$GR" rev-parse HEAD)
+  git -C "$GR" push -q "$G2U" main 2>/dev/null
+  rm -rf "$GR/sdata"
+  cp -r "$SRC/sdata" "$GR/sdata"
+  cp "$SRC/setup" "$GR/setup"
+  printf 'managed dots/.config/app .config/app\n' > "$GR/sdata/deploy/ownership.conf"
+  git -C "$GR" add -A
+  git -C "$GR" "${GCOMMIT[@]}" "current tip"
+  git -C "$GR" push -q "$G2U" main 2>/dev/null
+  GTIP=$(git -C "$GR" rev-parse HEAD)
+  GTIP_SHORT=$(git -C "$GR" rev-parse --short HEAD)
+  GC="$T/g-stale"
+  git clone -q "$G2U" "$GC" 2>/dev/null
+  git -C "$GC" checkout -q -B main "$GBASE" 2>/dev/null
+  git -C "$GC" branch --set-upstream-to=origin/main main 2>/dev/null
+  [[ "$(grep -c 'update_advance_checkout' "$GC/sdata/subcmd-update/0.run.sh" 2>/dev/null)" == "0" ]] \
+    && pass "G outer predates checkout convergence" || fail "G outer predates checkout convergence"
+  rm -rf "$T/hg" && cp -r "$H0" "$T/hg" && HG="$T/hg" && SDG="$HG/.config/illogical-impulse"
+  (cd /tmp && HOME="$HG" XDG_CONFIG_HOME="$HG/.config" XDG_DATA_HOME="$HG/.local/share" \
+    XDG_BIN_HOME="$HG/.local/bin" "$GC/setup" adopt --apply --at "$GBASE" --home "$HG" --state-dir "$SDG" </dev/null > /dev/null 2>&1)
+  [[ $? == 0 ]] && pass "G old adopt exits 0" || fail "G old adopt exits 0"
+  (cd /tmp && HOME="$HG" XDG_CONFIG_HOME="$HG/.config" XDG_DATA_HOME="$HG/.local/share" \
+    XDG_BIN_HOME="$HG/.local/bin" "$GC/setup" update --home "$HG" --state-dir "$SDG" </dev/null > /tmp/sum-g.out 2>&1)
+  [[ $? == 0 ]] && pass "G cross-version update exits 0" || fail "G cross-version update exits 0: $(tail -n 3 /tmp/sum-g.out)"
+  [[ "$(git -C "$GC" rev-parse HEAD)" == "$GTIP" ]] \
+    && pass "G stale checkout converged to target" || fail "G stale checkout converged to target"
+  [[ "$(jq -r '.last_verified.target // empty' "$SDG/deployment-identity.json")" == "$GTIP" ]] \
+    && pass "G verified checkpoint pinned target" || fail "G verified checkpoint pinned target"
+  grep -q "^Advanced checkout .* -> $GTIP_SHORT" /tmp/sum-g.out \
+    && pass "G advance reported by inner runner" || fail "G advance reported by inner runner"
+  (cd /tmp && HOME="$HG" XDG_CONFIG_HOME="$HG/.config" XDG_DATA_HOME="$HG/.local/share" \
+    XDG_BIN_HOME="$HG/.local/bin" "$GC/setup" update --home "$HG" --state-dir "$SDG" </dev/null > /tmp/sum-g2.out 2>&1)
+  [[ $? == 0 ]] && pass "G second update exits 0" || fail "G second update exits 0"
+  grep -q "^✓ Already up to date at $GTIP_SHORT" /tmp/sum-g2.out && [[ "$(grep -c '^Updating ' /tmp/sum-g2.out)" == "0" ]] \
+    && pass "G second run is concise steady state" || fail "G second run is concise steady state"
+fi
+
 if grep -q "will change" /tmp/sum-d.out /tmp/sum-b.out /tmp/sum-a.out; then
   fail "no shape uses the old conflated wording"
 else

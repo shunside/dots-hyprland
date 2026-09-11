@@ -137,13 +137,15 @@ update_record_verified(){
 }
 
 # Advance the checkout branch to the fetched target when safe: default
-# discovery flow only (never explicit --at, never dry run), on a branch
-# (never detached), tracking exactly the ref just fetched, and only from
-# a remote (never a local branch). git's own fast-forward rules decide:
-# dirty/diverged/local-ahead trees refuse by themselves and fall back to
-# handoff behavior. Reports only an actual pointer change.
+# discovery flow only (never an explicit user --at, never dry run), on a
+# branch (never detached), tracking exactly the ref just fetched, and only
+# from a remote (never a local branch). A handoff-inner run arrives pinned
+# but still converges the checkout it was delegated from — only a direct
+# user pin skips. git's own fast-forward rules decide: dirty/diverged/
+# local-ahead trees refuse by themselves and fall back to handoff
+# behavior. Reports only an actual pointer change.
 update_advance_checkout(){
-  [[ "${DEPLOY_UPDATE_AT_GIVEN:-false}" == true ]] && return 0
+  if [[ "${DEPLOY_UPDATE_AT_GIVEN:-false}" == true && "${UPDATE_HANDED_OFF:-false}" != true ]]; then return 0; fi
   [[ "${DEPLOY_UPDATE_DRYRUN:-false}" == true ]] && return 0
   [[ -z "${UPDATE_DISCOVERED_FROM:-}" || "$UPDATE_DISCOVERED_FROM" == local* ]] && return 0
   [[ -z "${UPDATE_REMOTE:-}" || -z "${UPDATE_BRANCH:-}" ]] && return 0
