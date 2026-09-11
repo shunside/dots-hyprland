@@ -325,5 +325,74 @@ printf 'local\n' > "$IH/.config/inttest/change.conf"
 grep -q "decide" /tmp/upd-entry3.out && pass "real blockage guides" || fail "real blockage guides"
 [[ "$(cat "$IH/.config/inttest/change.conf")" == "local" ]] && pass "blocked run preserves live" || fail "blocked run preserves live"
 
+echo "--- pty transitions leave no residue ---"
+if ! command -v script >/dev/null 2>&1; then
+  echo "SKIP: script(1) unavailable for pty checks"
+else
+  # Driver wrapper: update_run's environment as a file so script(1) can
+  # execute it under a pty. Raw bytes are kept (no CR stripping): every
+  # persistent line must start its own segment, and no spinner fragment
+  # may share one (the reported concatenation bug).
+  cat > "$T/pty-update.sh" <<'SCRIPT'
+unset FONTSET_DIR_NAME INSTALL_VIA_NIX
+DEPLOY_HOME_DIR="$PTY_HOME" DEPLOY_STATE_DIR="$PTY_STATE"
+DEPLOY_AT="${PTY_AT:-HEAD}" DEPLOY_UPDATE_AT_GIVEN=false
+[[ -n "${PTY_AT:-}" ]] && DEPLOY_UPDATE_AT_GIVEN=true
+DEPLOY_APPLY_FONTSET=""; DEPLOY_APPLY_FONTSET_SET=false; DEPLOY_APPLY_VIANIX_SET=false
+DEPLOY_UPDATE_DRYRUN="${PTY_DRYRUN:-false}" DEPLOY_UPDATE_VERBOSE=false
+declare -a APPLY_RESOLVE=()
+# shellcheck disable=SC1091
+source "${UPDATEDIR}/0.run.sh"
+SCRIPT
+  pty_run(){
+    TERM_SPIN_INTERVAL=0.001 script -qec "bash $T/pty-update.sh" /dev/null > "$T/pty-raw.out" 2>&1 < /dev/null
+  }
+  export REPO_ROOT="$R" DEPLOY_LIB_DIR="$LIBDIR" UPDATEDIR
+  export TERM_SPIN_INTERVAL=0.001
+  export PTY_HOME="$T/clean-home" PTY_STATE="$T/clean-state" PTY_AT="" PTY_DRYRUN=true
+  pty_run
+  [[ $? == 0 ]] && pass "pty dry run exits 0" || fail "pty dry run exits 0"
+  tr '\r' '\n' < "$T/pty-raw.out" | grep -c '^Updating ' | grep -q '^1$' \
+    && pass "summary starts its own segment" || fail "summary starts its own segment"
+  if grep -q 'Evaluating updateUpdating' "$T/pty-raw.out"; then
+    fail "no spinner residue before summary"
+  else
+    pass "no spinner residue before summary"
+  fi
+  grep -q '1 updates' "$T/pty-raw.out" \
+    && pass "dry run reports the pending update" || fail "dry run reports the pending update"
+  export PTY_HOME="$T/blocked-home" PTY_STATE="$T/blocked-state"
+  pty_run
+  [[ $? == 2 ]] && pass "pty blocked exits 2" || fail "pty blocked exits 2"
+  tr '\r' '\n' < "$T/pty-raw.out" | grep -q '^! Update blocked' \
+    && pass "blockage starts its own segment" || fail "blockage starts its own segment"
+  rm -rf "$T/pty-home" "$T/pty-state"
+  cp -r "$H0" "$T/pty-home"
+  printf '%s/.config/app/keep.conf\n' "$T/pty-home" > "$T/pty-home/.config/illogical-impulse/installed_listfile"
+  (
+    export REPO_ROOT="$R" DEPLOY_LIB_DIR="$LIBDIR"
+    unset FONTSET_DIR_NAME INSTALL_VIA_NIX
+    DEPLOY_AT="$REV_B" DEPLOY_HOME_DIR="$T/pty-home" DEPLOY_STATE_DIR="$T/pty-state"
+    DEPLOY_WANT_APPLY=true DEPLOY_WANT_STATUS=false DEPLOY_WANT_DRYRUN=false
+    # shellcheck disable=SC1091
+    source "${ADOPTDIR}/0.run.sh" > /dev/null 2>&1
+  ) || fail "pty fixture adoption failed"
+  export PTY_HOME="$T/pty-home" PTY_STATE="$T/pty-state" PTY_AT="" PTY_DRYRUN=false
+  pty_run
+  [[ $? == 0 ]] && pass "pty success exits 0" || fail "pty success exits 0: $(tail -n 2 "$T/pty-raw.out")"
+  tr '\r' '\n' < "$T/pty-raw.out" | grep -q '^✓ Updated to' \
+    && pass "success starts its own segment" || fail "success starts its own segment"
+  if grep -q 'Applying update✓ Updated' "$T/pty-raw.out"; then
+    fail "no spinner residue before result"
+  else
+    pass "no spinner residue before result"
+  fi
+  export PTY_DRYRUN=true
+  pty_run
+  [[ $? == 0 ]] && pass "pty second dry run exits 0" || fail "pty second dry run exits 0"
+  tr '\r' '\n' < "$T/pty-raw.out" | grep -q '^✓ Already up to date' \
+    && pass "noop result starts its own segment" || fail "noop result starts its own segment"
+fi
+
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" == 0 ]]

@@ -84,7 +84,7 @@ UPDATE_LOG=""
 if [[ "${DEPLOY_UPDATE_VERBOSE:-false}" != true ]]; then
   UPDATE_LOG="$(mktemp "${TMPDIR:-/tmp}/setup-update-XXXXXX.log" 2>/dev/null)" || exit 1
   # shellcheck disable=SC2064
-  trap "term_spin_stop >/dev/null 2>&1 || true; rm -f '$UPDATE_LOG'" EXIT
+  trap "term_spin_stop || true; rm -f '$UPDATE_LOG'" EXIT
 fi
 # Activity stages show only on interactive terminals (see terminal-spin);
 # verbose mode streams the raw technical report instead.
@@ -186,7 +186,7 @@ if [[ "${DEPLOY_UPDATE_AT_GIVEN:-false}" != true ]]; then
       esac
     done < <(git -C "$REPO_ROOT" remote 2>/dev/null || true)
     if [[ -z "$UPDATE_REMOTE" || -z "$UPDATE_BRANCH" ]]; then
-      term_spin_stop >/dev/null 2>&1 || true
+      term_spin_stop || true
       echo -e "${STY_FAINT}note: tracking ref $UPDATE_UPSTREAM matches no configured remote; using the local checkout.${STY_RST}"
     else
       UPDATE_FETCH_ERR=""
@@ -197,14 +197,14 @@ if [[ "${DEPLOY_UPDATE_AT_GIVEN:-false}" != true ]]; then
         fi
         echo "  Check the network or remote access, then re-run: $0 update${UPDATE_SUFFIX}" >&2
         echo "  For a fully local deploy of the current checkout: $0 update --at HEAD${UPDATE_SUFFIX}" >&2
-        term_spin_stop >/dev/null 2>&1 || true
+        term_spin_stop || true
         exit 1
       fi
       UPDATE_RESOLVED=""
       UPDATE_RESOLVED=$(git -C "$REPO_ROOT" rev-parse --verify "$UPDATE_REMOTE/$UPDATE_BRANCH^{commit}" 2>/dev/null || true)
       if [[ ! "$UPDATE_RESOLVED" =~ ^[0-9a-f]{40}$ ]]; then
         echo -e "${STY_RED}x${STY_RST} Update failed: remote tracking ref $UPDATE_REMOTE/$UPDATE_BRANCH did not resolve after fetching." >&2
-        term_spin_stop >/dev/null 2>&1 || true
+        term_spin_stop || true
         exit 1
       fi
       DEPLOY_AT="$UPDATE_RESOLVED"
@@ -218,28 +218,28 @@ if [[ "${DEPLOY_UPDATE_AT_GIVEN:-false}" != true ]]; then
     UPDATE_RESOLVED=$(git -C "$REPO_ROOT" rev-parse --verify "${UPDATE_UPSTREAM}^{commit}" 2>/dev/null || true)
     if [[ ! "$UPDATE_RESOLVED" =~ ^[0-9a-f]{40}$ ]]; then
       echo -e "${STY_RED}x${STY_RST} Update failed: tracked local branch $UPDATE_LOCAL_TRACK did not resolve." >&2
-      term_spin_stop >/dev/null 2>&1 || true
+      term_spin_stop || true
       exit 1
     fi
     DEPLOY_AT="$UPDATE_RESOLVED"
     UPDATE_DISCOVERED_FROM="local $UPDATE_LOCAL_TRACK"
     UPDATE_PIN_SUFFIX+=" --at $UPDATE_RESOLVED"
-    term_spin_stop >/dev/null 2>&1 || true
+    term_spin_stop || true
     echo -e "${STY_FAINT}note: tracking local branch $UPDATE_LOCAL_TRACK (no remote involved).${STY_RST}"
   else
-    term_spin_stop >/dev/null 2>&1 || true
+    term_spin_stop || true
     echo -e "${STY_FAINT}note: no remote tracking branch configured; using the local checkout. Pass --at explicitly to pin a revision, or set an upstream to track the fork.${STY_RST}"
   fi
 fi
 
-term_spin_stop >/dev/null 2>&1 || true
+term_spin_stop || true
 
 # --- Shared gates: state, target, inputs, plan, decisions, preflight. ---
 # Identical evaluation to every other caller; pure except for reads.
 update_stage "Evaluating update"
 UPDATE_PREP_RC=0
 update_tech deploy_apply_prepare_all || UPDATE_PREP_RC=$?
-term_spin_stop >/dev/null 2>&1 || true
+term_spin_stop || true
 if (( UPDATE_PREP_RC == 1 )); then
   echo -e "${STY_RED}x${STY_RST} Update failed: could not evaluate the pending update." >&2
   update_show_tech_log
@@ -384,7 +384,7 @@ fi
 update_stage "Applying update"
 UPDATE_RUN_RC=0
 update_tech deploy_apply_run_fresh || UPDATE_RUN_RC=$?
-term_spin_stop >/dev/null 2>&1 || true
+term_spin_stop || true
 if (( UPDATE_RUN_RC != 0 )); then
   echo -e "${STY_RED}x${STY_RST} Update to ${UPDATE_TARGET_SHORT} failed — no further writes attempted." >&2
   echo "  Resume: $0 apply --resume ${APPLY_ID:-<id>} --state-dir $(printf '%q' "$APPLY_SD")" >&2

@@ -23,6 +23,8 @@ Options:
   --fontset NAME Payload input override (default: the adopted input).
                  Use \"default\" to return to the default payload.
   --via-nix      Payload input override (default: the adopted input).
+  --verbose      List every row in the human summary, including the
+                 informational-only bulk rows summarized by default.
   -h, --help     Show this help message.
 
 Requires: jq (for reading deployment state).
@@ -32,7 +34,7 @@ Requires: jq (for reading deployment state).
 # `man getopt` to see more
 para=$(getopt \
   -o h \
-  -l help,at:,home:,state-dir:,fontset:,via-nix \
+  -l help,at:,home:,state-dir:,fontset:,via-nix,verbose \
   -n "$0" -- "$@")
 [ $? != 0 ] && echo "$0: Error when getopt, please recheck parameters." && exit 1
 
@@ -42,6 +44,7 @@ DEPLOY_STATE_DIR=""
 DEPLOY_PLAN_FONTSET=""
 DEPLOY_PLAN_FONTSET_SET=false
 DEPLOY_PLAN_VIANIX_SET=false
+DEPLOY_PLAN_VERBOSE=false
 
 eval set -- "$para"
 while true ; do
@@ -52,6 +55,7 @@ while true ; do
     --state-dir) DEPLOY_STATE_DIR="$2";shift 2;;
     --fontset) DEPLOY_PLAN_FONTSET="$2";DEPLOY_PLAN_FONTSET_SET=true;shift 2;;
     --via-nix) DEPLOY_PLAN_VIANIX_SET=true;shift;;
+    --verbose) DEPLOY_PLAN_VERBOSE=true;shift;;
     --) shift;break ;;
     *) echo -e "$0: Wrong parameters.";exit 1;;
   esac

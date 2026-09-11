@@ -137,11 +137,20 @@ if (( ${#PLAN_T_EXCLUDED[@]} > 0 )); then
   for p in "${PLAN_T_EXCLUDED[@]}"; do echo "    $p"; done
 fi
 declare -A ocounts=()
+# Both bodies are newline-stripped by construction; join them with exactly
+# one separator so the last plan row and the first evidence row never
+# fuse into a single corrupted line (which would misattribute one row
+# in every count and listing below).
+PLAN_ALL="${PLAN_TSV}"
+if [[ -n "$EVIDENCE_ROWS" ]]; then
+  [[ -n "$PLAN_ALL" ]] && PLAN_ALL+=$'\n'
+  PLAN_ALL+="$EVIDENCE_ROWS"
+fi
 while IFS=$'\t' read -r op _c _p _b _d _t _l _x; do
   [[ -z "$op" ]] && continue
   case "$op" in \#*) continue;; esac
   ocounts[$op]=$(( ${ocounts[$op]:-0} + 1 ))
-done <<<"${PLAN_TSV}${EVIDENCE_ROWS}"
+done <<<"$PLAN_ALL"
 order=(update add delete-stale sidecar-new unchanged converged gone conflict-drift conflict-removed delete-blocked drift-unchanged drift-update drift-moved drift-removed missing-unchanged add-evidence appeared class-changed retired type-changed preserved user-absent submodule-ok submodule-unverified submodule-diverged submodule-drifted submodule-update-available submodule-missing sidecar-pending legacy error)
 rollup_noop=0; rollup_write=0; rollup_decide=0; rollup_info=0
 for op in "${order[@]}"; do
@@ -164,13 +173,19 @@ done
 for op in update add delete-stale sidecar-new conflict-drift conflict-removed delete-blocked drift-unchanged drift-update drift-moved drift-removed missing-unchanged add-evidence appeared class-changed retired type-changed submodule-diverged submodule-drifted submodule-update-available submodule-missing submodule-unverified sidecar-pending legacy error; do
   n=${ocounts[$op]:-0}
   (( n == 0 )) && continue
+  # Informational-only bulk rows are summarized, not dumped: their full
+  # detail is always in the TSV above; --verbose restores this listing.
+  if [[ "$op" == legacy && "${DEPLOY_PLAN_VERBOSE:-false}" != true ]]; then
+    echo "  --- legacy (${n} informational-only rows; full list with --verbose) ---"
+    continue
+  fi
   echo "  --- ${op} (${n}) ---"
   while IFS=$'\t' read -r o c path bb bd tb live detail; do
     [[ -z "$o" ]] && continue
     if [[ "$o" == "$op" ]]; then
       printf '    [%s] %s  base=%s live=%s target=%s %s\n' "$c" "$path" "${bb:0:12}" "${live:0:24}" "${tb:0:12}" "$detail"
     fi
-  done <<<"${PLAN_TSV}${EVIDENCE_ROWS}"
+  done <<<"$PLAN_ALL"
 done
 echo "  unchanged/converged/gone omitted from listing (see TSV); preserved user paths left alone"
 echo "  decide/* rows need a recorded decision before any future apply may touch them"

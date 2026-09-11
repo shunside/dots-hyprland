@@ -430,6 +430,34 @@ else
   fail "weak-only legacy listed"
 fi
 
+echo "--- verbose gating for informational bulk ---"
+mkdir -p "$T/wbulk-home/.config/illogical-impulse"
+i=""
+for i in 1 2 3 4 5 6; do
+  printf '%s/.config/app/weak%s.conf\n' "$T/wbulk-home" "$i" >> "$T/wbulk-home/.config/illogical-impulse/installed_listfile"
+done
+adopt_run "$REV_T" "$T/wbulk-home" "$T/wbulk-state" apply > /dev/null 2>&1
+[[ $? == 0 ]] && pass "bulk-evidence adopt succeeds" || fail "bulk-evidence adopt succeeds"
+plan_run "$REV_T" "$T/wbulk-home" "$T/wbulk-state" > /tmp/plan-bulk-tsv.out 2> /tmp/plan-bulk.err
+[[ $? == 0 ]] && pass "bulk plan exits 0" || fail "bulk plan exits 0"
+[[ "$(grep -c $'^legacy\t' /tmp/plan-bulk-tsv.out)" == 6 ]] && pass "TSV keeps all legacy rows" || fail "TSV keeps all legacy rows"
+if grep -q $'^legacy\t' /tmp/plan-bulk.err; then
+  fail "default summary hides legacy rows"
+else
+  pass "default summary hides legacy rows"
+fi
+grep -q "legacy (6 informational-only rows; full list with --verbose)" /tmp/plan-bulk.err \
+  && pass "default summarizes the bulk" || fail "default summarizes the bulk"
+grep -q '^    legacy ' /tmp/plan-bulk.err && pass "rollup still counts legacy" || fail "rollup still counts legacy"
+plan_run "$REV_T" "$T/wbulk-home" "$T/wbulk-state" "DEPLOY_PLAN_VERBOSE=true" > /tmp/plan-bulkv-tsv.out 2> /tmp/plan-bulkv.err
+[[ $? == 0 ]] && pass "verbose plan exits 0" || fail "verbose plan exits 0"
+if cmp -s /tmp/plan-bulk-tsv.out /tmp/plan-bulkv-tsv.out; then
+  pass "TSV byte-identical across modes"
+else
+  fail "TSV byte-identical across modes"
+fi
+[[ "$(grep -c 'weak[0-9]\.conf' /tmp/plan-bulkv.err)" == 6 ]] && pass "verbose lists legacy rows" || fail "verbose lists legacy rows"
+
 echo "--- zero-write proof ---"
 REFLOG_B=$(git -C "$R" log -g --format=%H HEAD | head -n 1)
 STATUS_B=$(git -C "$R" status --porcelain=v1)
