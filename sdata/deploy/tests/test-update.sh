@@ -149,8 +149,8 @@ REV_T_SHORT=$(git -C "$R" rev-parse --short "$REV_T")
   source "${UPDATEDIR}/0.run.sh"
 ) < /dev/null > /tmp/upd-from.out 2>&1
 [[ $? == 0 ]] && pass "third-rev dry run exits 0" || fail "third-rev dry run exits 0"
-grep -q "Updating $REV_T_SHORT" /tmp/upd-from.out \
-  && pass "summary starts from last applied target" || fail "summary starts from last applied target: $(head -n 1 /tmp/upd-from.out)"
+grep -q "Updating payload $REV_T_SHORT" /tmp/upd-from.out \
+  && pass "summary starts from last applied target" || fail "summary starts from last applied target: $(grep '^Updating' /tmp/upd-from.out)"
 grep -q "1 updates" /tmp/upd-from.out && pass "third rev proposes one update" || fail "third rev proposes one update"
 fresh_case dry
 SNAP_DRY=$(disk_snapshot "$T/dry-home")

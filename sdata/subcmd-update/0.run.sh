@@ -201,6 +201,10 @@ if [[ "${DEPLOY_UPDATE_AT_GIVEN:-false}" != true ]]; then
       echo -e "${STY_FAINT}note: tracking ref $UPDATE_UPSTREAM matches no configured remote; using the local checkout.${STY_RST}"
     else
       UPDATE_FETCH_ERR=""
+      # Record the ref before fetching: a moved tracking ref is repository
+      # state this run advanced, and the summary reports it as such.
+      UPDATE_FETCH_BEFORE=""
+      UPDATE_FETCH_BEFORE=$(git -C "$REPO_ROOT" rev-parse --verify "$UPDATE_REMOTE/$UPDATE_BRANCH^{commit}" 2>/dev/null || true)
       if ! UPDATE_FETCH_ERR=$(git -C "$REPO_ROOT" fetch --quiet -- "$UPDATE_REMOTE" "$UPDATE_BRANCH" 2>&1); then
         echo -e "${STY_RED}x${STY_RST} Update failed: could not fetch $UPDATE_REMOTE/$UPDATE_BRANCH." >&2
         if [[ -n "$UPDATE_FETCH_ERR" ]]; then
@@ -222,6 +226,11 @@ if [[ "${DEPLOY_UPDATE_AT_GIVEN:-false}" != true ]]; then
       UPDATE_DISCOVERED_FROM="$UPDATE_REMOTE/$UPDATE_BRANCH"
       UPDATE_TARGET_WHENCE=" (latest on $UPDATE_REMOTE/$UPDATE_BRANCH)"
       UPDATE_PIN_SUFFIX+=" --at $UPDATE_RESOLVED"
+      if [[ "$UPDATE_FETCH_BEFORE" =~ ^[0-9a-f]{40}$ && "$UPDATE_FETCH_BEFORE" != "$UPDATE_RESOLVED" ]]; then
+        UPDATE_FETCH_BEFORE_SHORT=$(git -C "$REPO_ROOT" rev-parse --short "$UPDATE_FETCH_BEFORE" 2>/dev/null || printf '%s' "${UPDATE_FETCH_BEFORE:0:7}")
+        UPDATE_FETCH_AFTER_SHORT=$(git -C "$REPO_ROOT" rev-parse --short "$UPDATE_RESOLVED" 2>/dev/null || printf '%s' "${UPDATE_RESOLVED:0:7}")
+        echo -e "${STY_FAINT}note: fetched $UPDATE_REMOTE/$UPDATE_BRANCH ${UPDATE_FETCH_BEFORE_SHORT} -> ${UPDATE_FETCH_AFTER_SHORT}${STY_RST}"
+      fi
     fi
   elif [[ "$UPDATE_UPSTREAM" == refs/heads/* ]]; then
     UPDATE_LOCAL_TRACK="${UPDATE_UPSTREAM#refs/heads/}"
@@ -277,6 +286,17 @@ if [[ "${DEPLOY_UPDATE_AT_GIVEN:-false}" != true && -n "${UPDATE_DISCOVERED_FROM
       exit 1
     fi
     UPDATE_HANDOFF_RC=0
+    # Visible delegation: the implementation running from here on is the
+    # target's, not the checkout's. Without this line a stale checkout
+    # would print a summary that hides whose logic evaluated it.
+    UPDATE_HANDOFF_SHORT=$(git -C "$REPO_ROOT" rev-parse --short "$UPDATE_RESOLVED" 2>/dev/null || printf '%s' "${UPDATE_RESOLVED:0:7}")
+    UPDATE_HEAD_SHORT=""
+    if [[ -n "$UPDATE_LOCAL_HEAD" ]]; then
+      UPDATE_HEAD_SHORT=$(git -C "$REPO_ROOT" rev-parse --short "$UPDATE_LOCAL_HEAD" 2>/dev/null || printf '%s' "${UPDATE_LOCAL_HEAD:0:7}")
+    else
+      UPDATE_HEAD_SHORT="unknown"
+    fi
+    echo "Handed off to updater ${UPDATE_HANDOFF_SHORT} (checkout at ${UPDATE_HEAD_SHORT} stays untouched)"
     (
       # Pin the full driver contract explicitly: the inner runner belongs
       # to another revision and may expect variables this runner never
@@ -433,7 +453,11 @@ UPDATE_KEEP_TXT=""
 if (( UPDATE_N_KEEP > 0 )); then
   UPDATE_KEEP_TXT=" · ${UPDATE_N_KEEP} kept as-is by your decisions"
 fi
-echo -e "Updating ${UPDATE_BASE_SHORT} ${STY_FAINT}->${STY_RST} ${STY_BOLD}${UPDATE_TARGET_SHORT}${STY_RST}${UPDATE_TARGET_WHENCE:-}"
+# The summary speaks in dimensions so a zero in one cannot deny work in
+# another. Payload counts cover managed-payload writes only; discovery
+# (fetch), delegation (handoff), and launcher repair report on their own
+# lines above and below. The verdict claims no more than evaluated state.
+echo -e "Updating payload ${UPDATE_BASE_SHORT} ${STY_FAINT}->${STY_RST} ${STY_BOLD}${UPDATE_TARGET_SHORT}${STY_RST}${UPDATE_TARGET_WHENCE:-}"
 # Local-only commits never ride along implicitly: name them instead.
 if [[ -n "${UPDATE_DISCOVERED_FROM:-}" && "$UPDATE_DISCOVERED_FROM" != local* ]]; then
   UPDATE_AHEAD=0
@@ -442,7 +466,7 @@ if [[ -n "${UPDATE_DISCOVERED_FROM:-}" && "$UPDATE_DISCOVERED_FROM" != local* ]]
     echo -e "${STY_FAINT}note: local branch holds $UPDATE_AHEAD commit(s) not on $UPDATE_DISCOVERED_FROM; deploying the remote tip, local work untouched.${STY_RST}"
   fi
 fi
-echo "${UPDATE_N_WRITE} files will change: ${UPDATE_N_UPD} updates, ${UPDATE_N_INS} new, ${UPDATE_N_DEL} deletions, ${UPDATE_N_SIDE} sidecars${UPDATE_KEEP_TXT}"
+echo "Payload: ${UPDATE_N_WRITE} files to deploy (${UPDATE_N_UPD} updates, ${UPDATE_N_INS} new, ${UPDATE_N_DEL} deletions, ${UPDATE_N_SIDE} sidecars)${UPDATE_KEEP_TXT}"
 
 if (( UPDATE_N_WRITE == 0 )); then
   # Dry runs change nothing at all, including the launcher lifecycle.
