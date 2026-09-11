@@ -50,7 +50,12 @@ git -C "$R" config commit.gpgsign false
 GCOMMIT=(-c user.email=fixture@example -c user.name=fixture -c commit.gpgsign=false commit -qm)
 # Cloning an empty repo leaves HEAD unborn on main without upstream state;
 # push explicitly so the tracking relationship exists like a normal clone.
-mkdir -p "$R/dots/.config/app" "$R/sdata/deploy"
+# Full updater tree: remote-tip scenarios pin targets newer than the
+# checkout, so handoff materializes the target's implementation from
+# these objects. (The deploy engine itself is exercised, not mocked.)
+# NOTE: copy before any mkdir of $R/sdata, or cp -r nests sdata/sdata.
+cp -r "${HERE}/../../.."/sdata "$R/sdata"
+mkdir -p "$R/dots/.config/app"
 cat > "$R/sdata/deploy/ownership.conf" <<'EOF'
 managed dots/.config/app .config/app
 EOF

@@ -68,8 +68,10 @@ export APPLY_SD APPLY_DECISIONS_FILE
 # Echo-back suffix so copy-pasted follow-ups reuse non-default inputs.
 # UPDATE_PIN_SUFFIX additionally pins the discovered target commit for
 # commands that must evaluate the identical rows (plan, decide --set).
+# A handoff run inherits its target (and the plain suffix) from the
+# outer run instead of re-resolving, so --at echo-back stays deduplicated.
 UPDATE_SUFFIX=""
-if [[ "${DEPLOY_UPDATE_AT_GIVEN:-false}" == true ]]; then
+if [[ "${DEPLOY_UPDATE_AT_GIVEN:-false}" == true && "${UPDATE_HANDED_OFF:-false}" != true ]]; then
   UPDATE_SUFFIX+=" --at $(printf '%q' "$DEPLOY_AT")"
 fi
 if [[ -n "${DEPLOY_STATE_DIR:-}" ]]; then
@@ -168,9 +170,18 @@ fi
 # gate runs, so later remote movement cannot change the target mid-run.
 # An explicit --at keeps the historical fully-local behavior and never
 # fetches. plan/decide/apply are untouched and stay local-only.
-UPDATE_DISCOVERED_FROM=""
-UPDATE_TARGET_WHENCE=""
+# Discovery context survives handoff: the inner run inherits these from
+# the outer run's environment rather than re-resolving, so its summary
+# and divergence reporting describe the same pinned target.
+UPDATE_DISCOVERED_FROM="${UPDATE_DISCOVERED_FROM:-}"
+UPDATE_TARGET_WHENCE="${UPDATE_TARGET_WHENCE:-}"
 UPDATE_PIN_SUFFIX="$UPDATE_SUFFIX"
+if [[ "${UPDATE_HANDED_OFF:-false}" == true ]]; then
+  # Handoff runs arrive with an explicitly pinned target but must still
+  # point inspection guidance (plan, decide --set) at those identical
+  # rows. Re-running update itself stays unpinned to re-discover.
+  UPDATE_PIN_SUFFIX+=" --at ${DEPLOY_AT:-HEAD}"
+fi
 update_stage "Checking for updates"
 if [[ "${DEPLOY_UPDATE_AT_GIVEN:-false}" != true ]]; then
   UPDATE_UPSTREAM=""
@@ -234,6 +245,67 @@ fi
 
 term_spin_stop || true
 
+# --- Self-update handoff: run the target revision's updater, not ours.
+# A checkout older than the target would otherwise execute stale
+# deployment/CLI logic against new payload (and never pick up updater
+# fixes at all). When the pinned target differs from the running
+# checkout, materialize the target's updater implementation with
+# read-only object-store reads into a temp dir — working branch, index,
+# and worktree are never touched — and continue inside it as a subshell.
+# The inner run sees an explicit --at pin, so it never re-discovers and
+# can never hand off again. Cleanup runs here afterwards because the
+# inner run exits its subshell, never this shell.
+if [[ "${DEPLOY_UPDATE_AT_GIVEN:-false}" != true && -n "${UPDATE_DISCOVERED_FROM:-}" ]]; then
+  UPDATE_LOCAL_HEAD=""
+  UPDATE_LOCAL_HEAD=$(git -C "$REPO_ROOT" rev-parse --verify HEAD^{commit} 2>/dev/null || true)
+  if [[ "$DEPLOY_AT" != "$UPDATE_LOCAL_HEAD" || -z "$UPDATE_LOCAL_HEAD" ]]; then
+    UPDATE_HANDOFF_DIR=""
+    UPDATE_HANDOFF_DIR="$(mktemp -d "${TMPDIR:-/tmp}/setup-update-handoff-XXXXXX" 2>/dev/null)" || {
+      echo -e "${STY_RED}x${STY_RST} Update failed: cannot stage the target updater implementation." >&2
+      exit 1
+    }
+    UPDATE_HANDOFF_OK=false
+    if git -C "$REPO_ROOT" archive "$DEPLOY_AT" sdata/lib sdata/subcmd-update 2>/dev/null | tar -x -C "$UPDATE_HANDOFF_DIR" 2>/dev/null; then
+      if [[ -f "$UPDATE_HANDOFF_DIR/sdata/subcmd-update/0.run.sh" ]] && bash -n "$UPDATE_HANDOFF_DIR/sdata/subcmd-update/0.run.sh" 2>/dev/null; then
+        UPDATE_HANDOFF_OK=true
+      fi
+    fi
+    if [[ "$UPDATE_HANDOFF_OK" != true ]]; then
+      rm -rf "$UPDATE_HANDOFF_DIR" || true
+      echo -e "${STY_RED}x${STY_RST} Update failed: target $DEPLOY_AT has no runnable updater implementation." >&2
+      echo "  Deploy it explicitly with the local logic instead: $0 update --at $DEPLOY_AT${UPDATE_SUFFIX}" >&2
+      exit 1
+    fi
+    UPDATE_HANDOFF_RC=0
+    (
+      # Pin the full driver contract explicitly: the inner runner belongs
+      # to another revision and may expect variables this runner never
+      # set (or vice versa). Defaults mirror options.sh so version skew
+      # in either direction degrades to documented behavior, never to
+      # unbound-variable aborts. The target is pinned, never re-resolved.
+      # UPDATE_HANDED_OFF marks this as a handoff (not a user --at) so
+      # echo-back suffixes don't duplicate the pin.
+      DEPLOY_AT="$UPDATE_RESOLVED"
+      UPDATE_HANDED_OFF=true
+      DEPLOY_HOME_DIR="${DEPLOY_HOME_DIR:-$HOME}"
+      DEPLOY_STATE_DIR="${DEPLOY_STATE_DIR:-}"
+      DEPLOY_APPLY_FONTSET="${DEPLOY_APPLY_FONTSET:-}"
+      DEPLOY_APPLY_FONTSET_SET="${DEPLOY_APPLY_FONTSET_SET:-false}"
+      DEPLOY_APPLY_VIANIX_SET="${DEPLOY_APPLY_VIANIX_SET:-false}"
+      DEPLOY_UPDATE_DRYRUN="${DEPLOY_UPDATE_DRYRUN:-false}"
+      DEPLOY_UPDATE_VERBOSE="${DEPLOY_UPDATE_VERBOSE:-false}"
+      DEPLOY_UPDATE_AT_GIVEN=true
+      DEPLOY_LIB_DIR="$UPDATE_HANDOFF_DIR/sdata/lib"
+      if ! declare -p APPLY_RESOLVE >/dev/null 2>&1; then declare -a APPLY_RESOLVE=(); fi
+      # shellcheck disable=SC1091
+      source "$UPDATE_HANDOFF_DIR/sdata/subcmd-update/0.run.sh"
+    ) || UPDATE_HANDOFF_RC=$?
+    rm -rf "$UPDATE_HANDOFF_DIR" || true
+    exit "$UPDATE_HANDOFF_RC"
+  fi
+fi
+# --- End self-update handoff. ---
+
 # --- Shared gates: state, target, inputs, plan, decisions, preflight. ---
 # Identical evaluation to every other caller; pure except for reads.
 update_stage "Evaluating update"
@@ -285,7 +357,7 @@ elif (( UPDATE_PREP_RC != 0 )); then
       echo "    ...and $(( ${#APPLY_UNDECIDED[@]} - 12 )) more (full list: $0 plan${UPDATE_PIN_SUFFIX})" >&2
     fi
     echo "  Next step: record choices with $0 decide --set PATH=CHOICE [--set ...]${UPDATE_PIN_SUFFIX}" >&2
-    echo "  (each path's valid choices are listed by: $0 decide --help)" >&2
+    echo "  (inspect rows with: $0 plan${UPDATE_PIN_SUFFIX}; valid choices per path: $0 decide --help)" >&2
     echo "  One-shot alternative: $0 update --resolve PATH:CHOICE [...]${UPDATE_SUFFIX}" >&2
     echo "  Saved choices: $0 decide --list${UPDATE_SUFFIX}" >&2
     exit 2
@@ -375,7 +447,7 @@ if (( UPDATE_N_WRITE == 0 )); then
   echo -e "${STY_GREEN}✓${STY_RST} Already up to date at ${UPDATE_TARGET_SHORT} — nothing to do"
   exit 0
 fi
-if [[ "${DEPLOY_UPDATE_DRYRUN}" == true ]]; then
+if [[ "${DEPLOY_UPDATE_DRYRUN:-false}" == true ]]; then
   echo "dry run: showing the above without applying anything (nothing changed)"
   exit 0
 fi
