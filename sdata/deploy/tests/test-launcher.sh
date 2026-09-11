@@ -281,6 +281,40 @@ rm -f "$PH/.local/bin/impulse" "$PH/.config/fish/conf.d/impulse-path.fish"
   setup_launcher_ensure > /dev/null 2>&1
 )
 printf '# user content\n' > "$PH/.config/fish/conf.d/user-path.fish"
+
+echo "--- noop update converges partial launcher state (real entrypoint) ---"
+# Exact field shape: payload already noop, symlink correct, drop-in
+# missing, bin absent from PATH. Only `./setup update` runs.
+rm -f "$PH/.config/fish/conf.d/impulse-path.fish"
+(cd /tmp && HOME="$PH" XDG_CONFIG_HOME="$PH/.config" XDG_DATA_HOME="$PH/.local/share" \
+  XDG_BIN_HOME="$PH/.local/bin" "$LR/setup" update --home "$PH" --state-dir "$PH/.config/illogical-impulse" </dev/null > /tmp/lc-partial-a.out 2>&1)
+[[ $? == 0 ]] && pass "partial-state noop update exits 0" || fail "partial-state noop update exits 0"
+grep -q "Already up to date" /tmp/lc-partial-a.out \
+  && pass "partial-state run is a payload noop" || fail "partial-state run is a payload noop"
+[[ -f "$PH/.config/fish/conf.d/impulse-path.fish" ]] \
+  && pass "noop update repairs the missing drop-in" || fail "noop update repairs the missing drop-in"
+grep -q "new shells pick it up automatically" /tmp/lc-partial-a.out \
+  && pass "repair is announced" || fail "repair is announced"
+if [[ -n "$FISHBIN" ]]; then
+  [[ "$(new_fish 'command -v impulse')" == "$PH/.local/bin/impulse" ]] \
+    && pass "repaired state resolves in a new fish session" || fail "repaired state resolves in a new fish session"
+  (cd /tmp && new_fish 'impulse commands' > /tmp/lc-partial-a-fish.out 2>&1)
+  [[ $? == 0 ]] && grep -q "impulse update" /tmp/lc-partial-a-fish.out \
+    && pass "repaired impulse runs outside the repo" || fail "repaired impulse runs outside the repo"
+fi
+# Inverse: drop-in present, symlink missing, then symlink stale.
+rm -f "$PH/.local/bin/impulse"
+(cd /tmp && HOME="$PH" XDG_CONFIG_HOME="$PH/.config" XDG_DATA_HOME="$PH/.local/share" \
+  XDG_BIN_HOME="$PH/.local/bin" "$LR/setup" update --home "$PH" --state-dir "$PH/.config/illogical-impulse" </dev/null > /tmp/lc-partial-b.out 2>&1)
+[[ $? == 0 ]] && [[ -L "$PH/.local/bin/impulse" && "$(readlink -f "$PH/.local/bin/impulse")" == "$(readlink -f "$LR/setup")" ]] \
+  && pass "noop update repairs a missing symlink" || fail "noop update repairs a missing symlink"
+ln -sfn /bin/false "$PH/.local/bin/impulse"
+(cd /tmp && HOME="$PH" XDG_CONFIG_HOME="$PH/.config" XDG_DATA_HOME="$PH/.local/share" \
+  XDG_BIN_HOME="$PH/.local/bin" "$LR/setup" update --home "$PH" --state-dir "$PH/.config/illogical-impulse" </dev/null > /tmp/lc-partial-c.out 2>&1)
+[[ $? == 0 ]] && [[ "$(readlink -f "$PH/.local/bin/impulse")" == "$(readlink -f "$LR/setup")" ]] \
+  && pass "noop update repairs a stale symlink" || fail "noop update repairs a stale symlink"
+[[ -f "$PH/.config/fish/conf.d/impulse-path.fish" && -f "$PH/.config/fish/conf.d/user-path.fish" ]] \
+  && pass "repairs leave foreign conf.d files alone" || fail "repairs leave foreign conf.d files alone"
 (
   export HOME="$PH" XDG_CONFIG_HOME="$PH/.config" XDG_BIN_HOME="$PH/.local/bin" REPO_ROOT="$LR"
   setup_launcher_remove > /tmp/lc-remove-ph.out 2>&1

@@ -31,6 +31,17 @@ setup_path_snippet_content(){
     'end'
 }
 
+# Quiet predicate: does the managed drop-in currently hold? No writes,
+# no warnings; pairs with setup_path_ensure for check-then-act without
+# duplicating the ownership rule.
+function setup_path_present(){
+  local file="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/impulse-path.fish"
+  [[ -f "$file" ]] || return 1
+  [[ "$(head -n 1 "$file" 2>/dev/null || true)" == "$SETUP_PATH_SNIPPET_MARKER" ]] || return 1
+  [[ "$(cat "$file" 2>/dev/null || true)" == "$(setup_path_snippet_content)" ]] || return 1
+  return 0
+}
+
 # Ensure the persistent PATH drop-in. Idempotent: missing is written, ours
 # is normalized, foreign content is left alone with a warning. Own machine
 # only when the adoption context says foreign; warn-only so a completed
@@ -39,26 +50,20 @@ function setup_path_ensure(){
   if [[ -n "${DEPLOY_HOME:-}" && -n "${DEPLOY_SELF_HOME:-}" && "${DEPLOY_HOME}" != "${DEPLOY_SELF_HOME}" ]]; then
     return 0
   fi
+  if setup_path_present; then
+    return 0
+  fi
   local confdir="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d"
   local file="$confdir/impulse-path.fish"
-  local want
-  want="$(setup_path_snippet_content)"
   if [[ -f "$file" ]]; then
-    local first
-    first="$(head -n 1 "$file" 2>/dev/null || true)"
-    if [[ "$first" != "$SETUP_PATH_SNIPPET_MARKER" ]]; then
-      echo "warning: \"$file\" is not managed by setup; leaving it alone (new shells need ${XDG_BIN_HOME:-$HOME/.local/bin} on PATH)." >&2
-      return 1
-    fi
-    if [[ "$(cat "$file" 2>/dev/null)" == "$want" ]]; then
-      return 0
-    fi
+    echo "warning: \"$file\" is not managed by setup; leaving it alone (new shells need ${XDG_BIN_HOME:-$HOME/.local/bin} on PATH)." >&2
+    return 1
   fi
   mkdir -p "$confdir" 2>/dev/null || {
     echo "warning: cannot create $confdir; new shells need ${XDG_BIN_HOME:-$HOME/.local/bin} on PATH." >&2
     return 1
   }
-  if printf '%s\n' "$want" > "$file" 2>/dev/null; then
+  if printf '%s\n' "$(setup_path_snippet_content)" > "$file" 2>/dev/null; then
     return 0
   fi
   echo "warning: cannot write $file; new shells need ${XDG_BIN_HOME:-$HOME/.local/bin} on PATH." >&2
@@ -66,8 +71,10 @@ function setup_path_ensure(){
 }
 
 # Install (or repair) the launcher. Idempotent: an already-correct link
-# is a no-op, a stale link is replaced, and a non-symlink occupant is
-# left alone with a warning instead of failing the install.
+# is kept, a stale link is replaced, and a non-symlink occupant is left
+# alone with a warning instead of failing the install. Every path below
+# (except the foreign occupant, which returns early) converges the PATH
+# drop-in too: a correct symlink must never skip it.
 function setup_launcher_install(){
   local target link
   target="${REPO_ROOT}/setup"
@@ -79,16 +86,19 @@ function setup_launcher_install(){
     rtarget="$(readlink -f "$target" 2>/dev/null || printf '%s' "$target")"
     if [[ -n "$cur" && "$cur" == "$rtarget" ]]; then
       printf 'Global command already installed at "%s".\n' "$link"
-      return 0
+    else
+      printf 'Replacing stale launcher at "%s".\n' "$link"
+      rm -f -- "$link" || { echo "error: cannot remove $link" >&2; return 1; }
+      ln -s "$target" "$link" || { echo "error: cannot link $link" >&2; return 1; }
+      printf 'Installed global command "%s".\n' "$link"
     fi
-    printf 'Replacing stale launcher at "%s".\n' "$link"
-    rm -f -- "$link" || { echo "error: cannot remove $link" >&2; return 1; }
   elif [[ -e "$link" ]]; then
     echo "warning: \"$link\" exists and is not the setup launcher; leaving it alone." >&2
     return 0
+  else
+    ln -s "$target" "$link" || { echo "error: cannot link $link" >&2; return 1; }
+    printf 'Installed global command "%s".\n' "$link"
   fi
-  ln -s "$target" "$link" || { echo "error: cannot link $link" >&2; return 1; }
-  printf 'Installed global command "%s".\n' "$link"
   # Current-process courtesy for bash callers: prepend for this process so
   # the command works immediately here. Persistence across sessions comes
   # solely from the drop-in below, never from this export (a child process
@@ -102,12 +112,14 @@ function setup_launcher_install(){
 }
 
 # Ensure the launcher for interactive human use. Intended after a
-# successful adopt/update publication: silent when already correct, one
-# note when newly created, warning (still rc 0) when creation fails so a
-# completed deployment never fails over cosmetics. Own machine only —
-# adopting or updating a foreign tree must not touch the operator's bin
-# dir. Expects DEPLOY_HOME, DEPLOY_SELF_HOME, and REPO_ROOT from the
-# caller; styles degrade via defaults when sourced without setup.
+# successful adopt/update publication: silent when already converged, one
+# note when anything was repaired, warning (still rc 0) when creation
+# fails so a completed deployment never fails over cosmetics. Convergent
+# across BOTH owned files: a correct symlink alone never skips the PATH
+# drop-in, nor vice versa. Own machine only — adopting or updating a
+# foreign tree must not touch the operator's bin dir. Expects DEPLOY_HOME,
+# DEPLOY_SELF_HOME, and REPO_ROOT from the caller; styles degrade via
+# defaults when sourced without setup.
 function setup_launcher_ensure(){
   if [[ "${DEPLOY_HOME:-}" != "${DEPLOY_SELF_HOME:-}" || -z "${DEPLOY_HOME:-}" ]]; then
     return 0
@@ -119,7 +131,7 @@ function setup_launcher_ensure(){
   if [[ -L "$link" ]]; then
     cur="$(readlink -f "$link" 2>/dev/null || true)"
   fi
-  if [[ -n "$cur" && "$cur" == "$want" ]]; then
+  if [[ -n "$cur" && "$cur" == "$want" ]] && setup_path_present; then
     return 0
   fi
   setup_launcher_install >/dev/null 2>&1 || true
