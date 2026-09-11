@@ -162,6 +162,31 @@ stops and asks instead of being overwritten quietly.
 > `impulse update` checks your branch's tracking remote for the latest
 > revision first. Fully offline instead with `impulse update --at HEAD`.
 
+### One-time bridge for checkouts older than the updater handoff
+
+Checkouts that predate the self-update handoff cannot bootstrap
+themselves: their updater fetches the latest revision but has no code to
+run it with, so `update` may report "Already up to date" while the
+`impulse` launcher is still missing. That wording describes the payload,
+not the updater itself. If that is your machine, run once from anywhere:
+
+```sh
+git -C ~/Projects/dots-hyprland fetch origin main &&
+  bash <(git -C ~/Projects/dots-hyprland show FETCH_HEAD:sdata/lib/update-bridge.sh) \
+    --repo ~/Projects/dots-hyprland
+```
+
+The bridge fetches (remote-tracking refs only, like `update`), then tries
+to fast-forward your branch to the fetched target — this refuses rather
+than harms, so dirty, diverged, and local-ahead checkouts stay exactly as
+they are. On a clean checkout the branch advances and the checkout's own
+updater finishes the job, including the launcher. Otherwise the target
+revision's updater still runs pinned to deploy payload and launcher, and
+tells you how to finish migrating after reconciling the branch. Either
+way nothing is reset, and afterwards plain `impulse update` stays current
+by itself: every update executes the target revision's updater, so no
+future checkout needs this bridge again.
+
 ### Adopting a machine
 
 Adoption records what a machine looks like against one fork revision —

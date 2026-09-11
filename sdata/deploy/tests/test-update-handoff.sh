@@ -188,6 +188,16 @@ adopt_at "$H5" "$S0"
 [[ $? == 0 ]] && pass "explicit target works with broken remote" || fail "explicit target works with broken remote: $(tail -n 3 /tmp/hand-explicit.out)"
 [[ "$(cat "$H5/.config/app/upd.conf")" == "v3" ]] \
   && pass "explicit revision deployed" || fail "explicit revision deployed"
+# Same pin again: payload noop, but the checkout's updater lags the pinned
+# target, so the run must say tool revision differs (not just "up to date").
+(cd /tmp && HOME="$H5" XDG_CONFIG_HOME="$H5/.config" XDG_DATA_HOME="$H5/.local/share" \
+  XDG_BIN_HOME="$H5/.local/bin" PATH="$BIN:$PATH" \
+  impulse update --at "$S2" --home "$H5" --state-dir "$SD5" </dev/null > /tmp/hand-skew.out 2>&1)
+[[ $? == 0 ]] && pass "repeated explicit pin is a noop" || fail "repeated explicit pin is a noop"
+grep -q "payload matches, nothing to deploy" /tmp/hand-skew.out \
+  && pass "noop wording names the payload" || fail "noop wording names the payload"
+grep -q "tool revision differs" /tmp/hand-skew.out \
+  && pass "noop names the updater skew" || fail "noop names the updater skew"
 git -C "$R" remote set-url origin "$U"
 
 echo "--- dry run hands off but deploys nothing ---"

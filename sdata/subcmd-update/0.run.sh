@@ -285,6 +285,8 @@ if [[ "${DEPLOY_UPDATE_AT_GIVEN:-false}" != true && -n "${UPDATE_DISCOVERED_FROM
       # unbound-variable aborts. The target is pinned, never re-resolved.
       # UPDATE_HANDED_OFF marks this as a handoff (not a user --at) so
       # echo-back suffixes don't duplicate the pin.
+      # Keep this contract in sync with sdata/lib/update-bridge.sh, which
+      # pins the same variables for pre-handoff checkouts.
       DEPLOY_AT="$UPDATE_RESOLVED"
       UPDATE_HANDED_OFF=true
       DEPLOY_HOME_DIR="${DEPLOY_HOME_DIR:-$HOME}"
@@ -444,7 +446,20 @@ echo "${UPDATE_N_WRITE} files will change: ${UPDATE_N_UPD} updates, ${UPDATE_N_I
 
 if (( UPDATE_N_WRITE == 0 )); then
   setup_launcher_ensure
-  echo -e "${STY_GREEN}✓${STY_RST} Already up to date at ${UPDATE_TARGET_SHORT} — nothing to do"
+  echo -e "${STY_GREEN}✓${STY_RST} Already up to date at ${UPDATE_TARGET_SHORT} — payload matches, nothing to deploy"
+  # Deployment state and tool revision are distinct: the payload can be
+  # current while the checkout's own updater lags the deployed target
+  # (explicit --at always runs local logic by design). Handoff-inner runs
+  # are exempt — they already execute the target's implementation despite
+  # the checkout lagging behind it.
+  if [[ "${UPDATE_HANDED_OFF:-false}" != true ]]; then
+    UPDATE_RUNNER_HEAD=""
+    UPDATE_RUNNER_HEAD=$(git -C "$REPO_ROOT" rev-parse --verify HEAD^{commit} 2>/dev/null || true)
+    if [[ -n "$UPDATE_RUNNER_HEAD" && -n "${APPLY_TARGET:-}" && "$UPDATE_RUNNER_HEAD" != "$APPLY_TARGET" ]]; then
+      UPDATE_RUNNER_SHORT=$(git -C "$REPO_ROOT" rev-parse --short "$UPDATE_RUNNER_HEAD" 2>/dev/null || printf '%s' "${UPDATE_RUNNER_HEAD:0:7}")
+      echo -e "${STY_FAINT}note: this updater itself is running from ${UPDATE_RUNNER_SHORT}, not ${UPDATE_TARGET_SHORT} — payload is current, tool revision differs.${STY_RST}"
+    fi
+  fi
   exit 0
 fi
 if [[ "${DEPLOY_UPDATE_DRYRUN:-false}" == true ]]; then
