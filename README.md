@@ -154,15 +154,15 @@ From inside the repo checkout, `./setup` works the same
 `adopt` or `update` also installs the `impulse` launcher itself, so
 later runs work from anywhere.
 
-The launcher is two parts: a symlink in `~/.local/bin` and a managed
-fish drop-in (`~/.config/fish/conf.d/impulse-path.fish`) keeping that
-directory on `PATH`. Every new fish shell — login or not — picks it up
-with no reload or restart; the shell you ran the install from needs a
-fresh session (a child process cannot change its parent's `PATH`).
-Uninstall removes both, but only when they are project-owned: anything
-else at those paths is left alone with a warning. Bash/zsh users add
-`~/.local/bin` to `PATH` once themselves
-(`export PATH="$HOME/.local/bin:$PATH"`).
+The launcher is a symlink in `~/.local/bin` plus per-shell `PATH`
+integration, all project-owned and reversible: a fish drop-in
+(`~/.config/fish/conf.d/impulse-path.fish`), and one hook line in
+`~/.bashrc`, `~/.profile`, and — when zsh is installed — `~/.zshrc` /
+`~/.zprofile`, sourcing one owned env file. Every new shell picks it up
+with no reload or restart (the shell you ran the install from needs a
+fresh session). Uninstall removes only what it owns; anything else is
+left alone. Nushell is not auto-managed (no interpreter here to validate
+against) — manually prepend `~/.local/bin` to its `PATH` once.
 
 `update` only touches fork-managed files. User- and runtime-owned state
 is left alone, and anything locally different that needs a human call

@@ -30,7 +30,12 @@ export XDG_BIN_HOME="$T/bin"
 # Contain the managed fish PATH drop-in too: install() writes it under
 # XDG_CONFIG_HOME, which would otherwise be the real home here.
 export XDG_CONFIG_HOME="$T/xdg"
+# Contain the sh-family integration as well: install() manages rc hooks
+# under $HOME and env.sh under XDG_DATA_HOME.
+export HOME="$T/uhome"
+export XDG_DATA_HOME="$T/uhome/.local/share"
 export PATH="$T/bin:$PATH"
+HOOK_LINE="$(setup_sh_hook_line)"
 
 echo "--- install/remove semantics ---"
 setup_launcher_install > /tmp/lc-install.out 2>&1
@@ -59,6 +64,18 @@ setup_launcher_install > /tmp/lc-path.out 2>&1
   && pass "drop-in carries the ownership marker" || fail "drop-in carries the ownership marker"
 grep -qF "set -gx PATH \"$T/bin\" \$PATH" "$T/xdg/fish/conf.d/impulse-path.fish" \
   && pass "drop-in prepends the launcher dir" || fail "drop-in prepends the launcher dir"
+[[ -f "$T/uhome/.local/share/illogical-impulse/env.sh" ]] \
+  && pass "install writes the owned sh env file" || fail "install writes the owned sh env file"
+[[ "$(grep -cFx -e "${HOOK_LINE}" "$T/uhome/.bashrc" 2>/dev/null)" == "1" ]] \
+  && pass "install hooks bashrc once" || fail "install hooks bashrc once"
+[[ "$(grep -cFx -e "${HOOK_LINE}" "$T/uhome/.profile" 2>/dev/null)" == "1" ]] \
+  && pass "install hooks profile once" || fail "install hooks profile once"
+if command -v zsh >/dev/null 2>&1; then
+  [[ -f "$T/uhome/.zshrc" ]] && pass "installed zsh gets hooks" || fail "installed zsh gets hooks"
+else
+  [[ ! -e "$T/uhome/.zshrc" && ! -e "$T/uhome/.zprofile" ]] \
+    && pass "absent zsh gets no files" || fail "absent zsh gets no files"
+fi
 printf '# user content\n' > "$T/xdg/fish/conf.d/impulse-path.fish"
 setup_launcher_install > /tmp/lc-pathforeign.out 2>&1
 [[ $? == 0 ]] && [[ "$(cat "$T/xdg/fish/conf.d/impulse-path.fish")" == "# user content" ]] \
@@ -316,13 +333,115 @@ ln -sfn /bin/false "$PH/.local/bin/impulse"
 [[ -f "$PH/.config/fish/conf.d/impulse-path.fish" && -f "$PH/.config/fish/conf.d/user-path.fish" ]] \
   && pass "repairs leave foreign conf.d files alone" || fail "repairs leave foreign conf.d files alone"
 (
-  export HOME="$PH" XDG_CONFIG_HOME="$PH/.config" XDG_BIN_HOME="$PH/.local/bin" REPO_ROOT="$LR"
+  export HOME="$PH" XDG_CONFIG_HOME="$PH/.config" XDG_DATA_HOME="$PH/.local/share" XDG_BIN_HOME="$PH/.local/bin" REPO_ROOT="$LR"
   setup_launcher_remove > /tmp/lc-remove-ph.out 2>&1
 )
 [[ $? == 0 && ! -e "$PH/.local/bin/impulse" && ! -e "$PH/.config/fish/conf.d/impulse-path.fish" ]] \
   && pass "uninstall removes owned launcher and drop-in" || fail "uninstall removes owned launcher and drop-in"
+[[ ! -e "$PH/.local/share/illogical-impulse/env.sh" && ! -e "$PH/.bashrc" && ! -e "$PH/.profile" ]] \
+  && pass "uninstall removes owned sh integration" || fail "uninstall removes owned sh integration"
 [[ -x "$PH/.local/bin/other-tool" && -f "$PH/.config/fish/conf.d/user-path.fish" ]] \
   && pass "uninstall keeps foreign files" || fail "uninstall keeps foreign files"
+
+
+echo "--- cross-shell integration (seeded user content, real shells) ---"
+SH="$T/shhome"
+mkdir -p "$SH/.config/app" "$SH/.config/illogical-impulse" "$SH/.local/bin"
+printf 'v2\n' > "$SH/.config/app/upd.conf"
+printf '# user bashrc\n[[ $- != *i* ]] && return\n' > "$SH/.bashrc"
+printf '. "$HOME/.cargo/env"\n' > "$SH/.profile"
+printf '# user zshrc\n' > "$SH/.zshrc"
+printf '#!/bin/sh\necho unrelated\n' > "$SH/.local/bin/other-tool"
+chmod +x "$SH/.local/bin/other-tool"
+# Expected hook/env content rendered for the fixture home (placement and
+# preservation are asserted by cmp; live shells below prove semantics).
+SH_HOOK="$( (export HOME="$SH" XDG_DATA_HOME="$SH/.local/share" XDG_BIN_HOME="$SH/.local/bin"; setup_sh_hook_line) )"
+SH_ENV="$( (export HOME="$SH" XDG_DATA_HOME="$SH/.local/share" XDG_BIN_HOME="$SH/.local/bin"; setup_env_sh_content) )"
+printf '# user bashrc\n[[ $- != *i* ]] && return\n\n%s\n' "$SH_HOOK" > /tmp/exp-sh-bashrc
+printf '. "$HOME/.cargo/env"\n\n%s\n' "$SH_HOOK" > /tmp/exp-sh-profile
+sh_entry(){
+  (cd /tmp && HOME="$SH" XDG_CONFIG_HOME="$SH/.config" XDG_DATA_HOME="$SH/.local/share" \
+    XDG_BIN_HOME="$SH/.local/bin" "$LR/setup" "$@" </dev/null)
+}
+sh_entry adopt --apply --at HEAD --home "$SH" --state-dir "$SH/.config/illogical-impulse" > /dev/null 2>&1
+[[ $? == 0 ]] && pass "sh-model adopt exits 0" || fail "sh-model adopt exits 0"
+sh_entry update --home "$SH" --state-dir "$SH/.config/illogical-impulse" > /tmp/lc-sh-update.out 2>&1
+[[ $? == 0 ]] && pass "sh-model noop update exits 0" || fail "sh-model noop update exits 0"
+cmp -s "$SH/.bashrc" /tmp/exp-sh-bashrc \
+  && pass "bashrc user content preserved around hook" || fail "bashrc user content preserved around hook"
+cmp -s "$SH/.profile" /tmp/exp-sh-profile \
+  && pass "profile user content preserved around hook" || fail "profile user content preserved around hook"
+[[ "$(cat "$SH/.local/share/illogical-impulse/env.sh")" == "$SH_ENV" ]] \
+  && pass "owned env.sh holds the rendered body" || fail "owned env.sh holds the rendered body"
+[[ -f "$SH/.config/fish/conf.d/impulse-path.fish" ]] \
+  && pass "fish drop-in coexists" || fail "fish drop-in coexists"
+if command -v zsh >/dev/null 2>&1; then
+  [[ "$(grep -cFx -e "$SH_HOOK" "$SH/.zshrc" 2>/dev/null)" == "1" ]] \
+    && pass "installed zsh hooked" || fail "installed zsh hooked"
+else
+  cmp -s "$SH/.zshrc" <(printf '# user zshrc\n') \
+    && pass "absent zsh leaves zshrc untouched" || fail "absent zsh leaves zshrc untouched"
+  echo "SKIP: zsh unavailable for live checks"
+fi
+[[ ! -e "$SH/.config/nushell" ]] \
+  && pass "nushell state untouched (not managed)" || fail "nushell state untouched (not managed)"
+# Live shells, scrubbed env, bin absent from PATH.
+[[ "$(env -i HOME="$SH" PATH="/usr/bin:/bin" bash -i -c 'command -v impulse' 2>/dev/null)" == "$SH/.local/bin/impulse" ]] \
+  && pass "new interactive bash resolves impulse" || fail "new interactive bash resolves impulse"
+[[ "$(env -i HOME="$SH" PATH="/usr/bin:/bin" bash --login -c 'command -v impulse' 2>/dev/null)" == "$SH/.local/bin/impulse" ]] \
+  && pass "new login bash resolves impulse" || fail "new login bash resolves impulse"
+[[ "$(env -i HOME="$SH" PATH="/usr/bin:/bin" sh -l -c 'command -v impulse' 2>/dev/null)" == "$SH/.local/bin/impulse" ]] \
+  && pass "new login sh resolves impulse" || fail "new login sh resolves impulse"
+[[ -z "$(env -i HOME="$SH" PATH="/usr/bin:/bin" sh -c 'command -v impulse' 2>/dev/null)" ]] \
+  && pass "non-login sh reads no rc (documented)" || fail "non-login sh reads no rc (documented)"
+(cd /tmp && env -i HOME="$SH" PATH="/usr/bin:/bin" bash -i -c 'impulse commands' > /tmp/lc-sh-bash-out.txt 2>&1)
+[[ $? == 0 ]] && grep -q "impulse update" /tmp/lc-sh-bash-out.txt \
+  && pass "impulse runs outside the repo under bash" || fail "impulse runs outside the repo under bash"
+if command -v zsh >/dev/null 2>&1; then
+  [[ "$(env -i HOME="$SH" PATH="/usr/bin:/bin" zsh -i -c 'command -v impulse' 2>/dev/null)" == "$SH/.local/bin/impulse" ]] \
+    && pass "new interactive zsh resolves impulse" || fail "new interactive zsh resolves impulse"
+fi
+# Idempotent repeat: single hooks, identical bytes.
+sh_entry update --home "$SH" --state-dir "$SH/.config/illogical-impulse" > /dev/null 2>&1
+[[ "$(grep -cFx -e "$SH_HOOK" "$SH/.bashrc")" == "1" && "$(grep -cFx -e "$SH_HOOK" "$SH/.profile")" == "1" ]] \
+  && pass "repeat update keeps single hooks" || fail "repeat update keeps single hooks"
+cmp -s "$SH/.bashrc" /tmp/exp-sh-bashrc && cmp -s "$SH/.profile" /tmp/exp-sh-profile \
+  && pass "repeat update preserves rc bytes" || fail "repeat update preserves rc bytes"
+# Partial state converges per component.
+rm -f "$SH/.local/share/illogical-impulse/env.sh"
+sh_entry update --home "$SH" --state-dir "$SH/.config/illogical-impulse" > /dev/null 2>&1
+[[ -f "$SH/.local/share/illogical-impulse/env.sh" ]] \
+  && pass "deleted env.sh is recreated" || fail "deleted env.sh is recreated"
+printf '# user bashrc\n[[ $- != *i* ]] && return\n' > "$SH/.bashrc"
+sh_entry update --home "$SH" --state-dir "$SH/.config/illogical-impulse" > /dev/null 2>&1
+cmp -s "$SH/.bashrc" /tmp/exp-sh-bashrc \
+  && pass "deleted hook is re-appended" || fail "deleted hook is re-appended"
+# A user-modified marker block is foreign: warned, never rewritten, and
+# the limitation surfaces instead of silent success.
+printf '%s\n' "${SH_HOOK//illogical-impulse\/env.sh/opt\/env.sh}" > "$SH/.bashrc.mod"
+printf '# user bashrc\n[[ $- != *i* ]] && return\n\n%s\n' "$(cat "$SH/.bashrc.mod")" > "$SH/.bashrc"
+rm -f "$SH/.bashrc.mod"
+sh_entry update --home "$SH" --state-dir "$SH/.config/illogical-impulse" > /tmp/lc-sh-foreign.out 2>&1
+[[ $? == 0 ]] && pass "foreign hook still exits 0" || fail "foreign hook still exits 0"
+grep -q "modified impulse-path block" /tmp/lc-sh-foreign.out || grep -q "to PATH for new shells" /tmp/lc-sh-foreign.out \
+  && pass "foreign hook limitation surfaces" || fail "foreign hook limitation surfaces"
+grep -qF "/opt/env.sh" "$SH/.bashrc" \
+  && pass "foreign hook bytes untouched" || fail "foreign hook bytes untouched"
+# Uninstall sweeps owned state, keeps everything else byte-identical.
+(
+  export HOME="$SH" XDG_CONFIG_HOME="$SH/.config" XDG_DATA_HOME="$SH/.local/share" XDG_BIN_HOME="$SH/.local/bin" REPO_ROOT="$LR"
+  setup_launcher_remove > /tmp/lc-remove-sh.out 2>&1
+)
+[[ ! -e "$SH/.local/bin/impulse" && ! -e "$SH/.local/share/illogical-impulse/env.sh" && ! -e "$SH/.config/fish/conf.d/impulse-path.fish" ]] \
+  && pass "uninstall removes owned shell state" || fail "uninstall removes owned shell state"
+printf '# user bashrc\n[[ $- != *i* ]] && return\n\n%s\n' "$(grep -F 'impulse-path' "$SH/.bashrc" | head -n 1)" > /tmp/exp-sh-modified
+cmp -s "$SH/.bashrc" /tmp/exp-sh-modified \
+  && pass "uninstall keeps the foreign block" || fail "uninstall keeps the foreign block"
+printf '. "$HOME/.cargo/env"\n' > /tmp/exp-sh-profile-seed
+cmp -s "$SH/.profile" /tmp/exp-sh-profile-seed \
+  && pass "uninstall restores profile bytes" || fail "uninstall restores profile bytes"
+[[ -x "$SH/.local/bin/other-tool" ]] \
+  && pass "uninstall keeps unrelated bin entry" || fail "uninstall keeps unrelated bin entry"
 
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" == 0 ]]
