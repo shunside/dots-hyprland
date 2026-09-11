@@ -22,6 +22,7 @@ set -uo pipefail
 DEPLOY_LIB_DIR="${DEPLOY_LIB_DIR:-${REPO_ROOT}/sdata/lib}"
 source "${DEPLOY_LIB_DIR}/deploy-common.sh"
 source "${DEPLOY_LIB_DIR}/deploy-state.sh"
+source "${DEPLOY_LIB_DIR}/setup-launcher.sh"
 
 # jq reads deployment state (status verification); fail closed first.
 if ! deploy_require_jq; then
@@ -318,6 +319,12 @@ if ! deploy_atomic_publish "$STATE_DIR" "$MANIFEST" "$EVIDENCE" "$IDENTITY"; the
   echo "[$0]: adoption publication failed (see above); no valid identity exists" >&2
   exit 1
 fi
+
+# The normal lifecycle self-delivers the global launcher so an onboarded
+# machine never needs a separate install step for it. Warn-only: the
+# baseline is already recorded at this point, and foreign-tree adoption
+# is skipped inside the helper.
+setup_launcher_ensure
 
 {
 echo "[$0]: adoption recorded"

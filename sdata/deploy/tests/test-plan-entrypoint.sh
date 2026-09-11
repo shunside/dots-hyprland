@@ -33,7 +33,7 @@ git -C "$I" config commit.gpgsign false
 cp "$SRC/setup" "$I/setup"
 mkdir -p "$I/sdata/deploy" "$I/sdata/subcmd-adopt" "$I/sdata/subcmd-plan"
 cp "$SRC/sdata/deploy/ownership.conf" "$I/sdata/deploy/"
-cp "$SRC/sdata/lib/deploy-common.sh" "$SRC/sdata/lib/deploy-state.sh" "$SRC/sdata/lib/deploy-plan.sh" "$I/sdata/lib/"
+cp "$SRC/sdata/lib/deploy-common.sh" "$SRC/sdata/lib/deploy-state.sh" "$SRC/sdata/lib/deploy-plan.sh" "$SRC/sdata/lib/setup-launcher.sh" "$I/sdata/lib/"
 cp "$SRC/sdata/subcmd-adopt/options.sh" "$SRC/sdata/subcmd-adopt/0.run.sh" "$I/sdata/subcmd-adopt/"
 cp "$SRC/sdata/subcmd-plan/options.sh" "$SRC/sdata/subcmd-plan/0.run.sh" "$I/sdata/subcmd-plan/"
 # Tiny fixture payload + registry rules.

@@ -46,6 +46,16 @@ When adding or substantially changing a user-visible fork feature:
    - `./setup commands` is the complete command inventory.
    - Do not promote legacy/internal commands as the normal workflow.
 
+7. Document behavior users didn't explicitly invoke.
+   - If setup installs, generates, or links something as a side effect
+     of another command, say where users will encounter it, not how it
+     is implemented.
+
+7. Document lifecycle behavior users didn't explicitly invoke.
+   - If setup installs, generates, or links something as a side effect
+     of another command, say where users will encounter it, not how it
+     is implemented.
+
 Before editing this README, read the whole document and place information
 according to this structure rather than simply appending text.
 -->
@@ -124,6 +134,9 @@ End-4 installs or hand-copying configs between machines:
 ./diagnose               # read-only system report
 ```
 
+Installing also links the `impulse` command, so later runs work from
+anywhere without revisiting the checkout.
+
 `dots/` mirrors `$HOME`; machine differences are parameterized, not hardcoded.
 
 ## Updates
@@ -137,11 +150,63 @@ impulse commands          # everything else this setup system can do
 ```
 
 From inside the repo checkout, `./setup` works the same
-(`./setup update`, `./setup commands`, …).
+(`./setup update`, `./setup commands`, …). The first successful
+`adopt` or `update` also installs the `impulse` launcher itself, so
+later runs work from anywhere.
 
 `update` only touches fork-managed files. User- and runtime-owned state
 is left alone, and anything locally different that needs a human call
 stops and asks instead of being overwritten quietly.
+
+> [!NOTE]
+> `impulse update` checks your branch's tracking remote for the latest
+> revision first. Fully offline instead with `impulse update --at HEAD`.
+
+### Adopting a machine
+
+Adoption records what a machine looks like against one fork revision —
+which files match, which drifted, which are missing. It changes nothing;
+it just gives every future update an honest baseline to compare against:
+
+```sh
+./setup adopt              # preview the baseline, change nothing
+./setup adopt --apply      # record it
+```
+
+Coming from stock End-4? Clone this repo next to your setup and adopt.
+Your files stay where they are; `impulse update --dry-run` then shows
+exactly what the fork would change before anything moves.
+
+### When files differ
+
+| Situation | Choices |
+|---|---|
+| You changed a file the fork also changed | `replace` (take fork version) or `keep` (leave mine) |
+| The fork dropped a file you still have | `accept-removal` or `reinstall` |
+| The fork wants to delete a file you changed | `delete` or `keep` |
+| The fork added a file you don't have | `install` or `preserve-absence` |
+
+```sh
+impulse decide --set path=choice [...]  # record choices
+impulse decide --list                   # review them
+```
+
+Choices stick to the exact state you decided on; edit the file
+afterwards and the update just asks again.
+
+<details>
+<summary>Advanced controls, offline use, and recovery</summary>
+
+- `impulse plan` shows the full pending-change table behind the summary.
+- `impulse apply --preflight` checks every gate without applying.
+  `--resume ID` / `--abort ID` recover an interrupted run;
+  `--break-lock` clears a dead lock file only (never transaction state).
+- `impulse adopt --status` reports baseline health.
+- Fully local or offline: `impulse update --at HEAD` never touches the
+  network. With no tracking branch configured, a bare `update` says so
+  and uses the local checkout.
+
+</details>
 
 Arch is the environment actually being tested. Other distros exist as
 best-effort overlays.

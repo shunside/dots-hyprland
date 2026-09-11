@@ -32,6 +32,8 @@ source "${DEPLOY_LIB_DIR}/deploy-state.sh"
 source "${DEPLOY_LIB_DIR}/deploy-plan.sh"
 source "${DEPLOY_LIB_DIR}/deploy-decide.sh"
 source "${DEPLOY_LIB_DIR}/deploy-apply.sh"
+source "${DEPLOY_LIB_DIR}/terminal-spin.sh"
+source "${DEPLOY_LIB_DIR}/setup-launcher.sh"
 
 if ! deploy_require_jq; then
   exit 1
@@ -82,8 +84,15 @@ UPDATE_LOG=""
 if [[ "${DEPLOY_UPDATE_VERBOSE:-false}" != true ]]; then
   UPDATE_LOG="$(mktemp "${TMPDIR:-/tmp}/setup-update-XXXXXX.log" 2>/dev/null)" || exit 1
   # shellcheck disable=SC2064
-  trap "rm -f '$UPDATE_LOG'" EXIT
+  trap "term_spin_stop >/dev/null 2>&1 || true; rm -f '$UPDATE_LOG'" EXIT
 fi
+# Activity stages show only on interactive terminals (see terminal-spin);
+# verbose mode streams the raw technical report instead.
+update_stage(){
+  if [[ "${DEPLOY_UPDATE_VERBOSE:-false}" != true ]]; then
+    term_spin_start "$1"
+  fi
+}
 # Run a lib entry, capturing technical output unless verbose. Both
 # streams are captured: success/failure reporting below speaks in user
 # concepts, and the transaction machinery (journal ids, preflight
@@ -99,8 +108,9 @@ update_tech(){
 update_show_tech_log(){
   if [[ -n "$UPDATE_LOG" && -s "$UPDATE_LOG" ]]; then
     echo "  Technical detail:" >&2
-    sed 's/^/    /' "$UPDATE_LOG" >&2
+    sed 's/^/    /' "$UPDATE_LOG" >&2 || true
   fi
+  return 0
 }
 
 # --- Read-only state gates (no writes, not even the lock). ---
@@ -161,6 +171,7 @@ fi
 UPDATE_DISCOVERED_FROM=""
 UPDATE_TARGET_WHENCE=""
 UPDATE_PIN_SUFFIX="$UPDATE_SUFFIX"
+update_stage "Checking for updates"
 if [[ "${DEPLOY_UPDATE_AT_GIVEN:-false}" != true ]]; then
   UPDATE_UPSTREAM=""
   UPDATE_UPSTREAM=$(git -C "$REPO_ROOT" rev-parse --symbolic-full-name "@{u}" 2>/dev/null || true)
@@ -175,20 +186,25 @@ if [[ "${DEPLOY_UPDATE_AT_GIVEN:-false}" != true ]]; then
       esac
     done < <(git -C "$REPO_ROOT" remote 2>/dev/null || true)
     if [[ -z "$UPDATE_REMOTE" || -z "$UPDATE_BRANCH" ]]; then
-      echo "${STY_FAINT}note: tracking ref $UPDATE_UPSTREAM matches no configured remote; using the local checkout.${STY_RST}"
+      term_spin_stop >/dev/null 2>&1 || true
+      echo -e "${STY_FAINT}note: tracking ref $UPDATE_UPSTREAM matches no configured remote; using the local checkout.${STY_RST}"
     else
       UPDATE_FETCH_ERR=""
       if ! UPDATE_FETCH_ERR=$(git -C "$REPO_ROOT" fetch --quiet -- "$UPDATE_REMOTE" "$UPDATE_BRANCH" 2>&1); then
         echo -e "${STY_RED}x${STY_RST} Update failed: could not fetch $UPDATE_REMOTE/$UPDATE_BRANCH." >&2
-        [[ -n "$UPDATE_FETCH_ERR" ]] && echo "  $(head -n 1 <<<"$UPDATE_FETCH_ERR")" >&2
+        if [[ -n "$UPDATE_FETCH_ERR" ]]; then
+          echo "  $(head -n 1 <<<"$UPDATE_FETCH_ERR")" >&2
+        fi
         echo "  Check the network or remote access, then re-run: $0 update${UPDATE_SUFFIX}" >&2
         echo "  For a fully local deploy of the current checkout: $0 update --at HEAD${UPDATE_SUFFIX}" >&2
+        term_spin_stop >/dev/null 2>&1 || true
         exit 1
       fi
       UPDATE_RESOLVED=""
       UPDATE_RESOLVED=$(git -C "$REPO_ROOT" rev-parse --verify "$UPDATE_REMOTE/$UPDATE_BRANCH^{commit}" 2>/dev/null || true)
       if [[ ! "$UPDATE_RESOLVED" =~ ^[0-9a-f]{40}$ ]]; then
         echo -e "${STY_RED}x${STY_RST} Update failed: remote tracking ref $UPDATE_REMOTE/$UPDATE_BRANCH did not resolve after fetching." >&2
+        term_spin_stop >/dev/null 2>&1 || true
         exit 1
       fi
       DEPLOY_AT="$UPDATE_RESOLVED"
@@ -202,21 +218,28 @@ if [[ "${DEPLOY_UPDATE_AT_GIVEN:-false}" != true ]]; then
     UPDATE_RESOLVED=$(git -C "$REPO_ROOT" rev-parse --verify "${UPDATE_UPSTREAM}^{commit}" 2>/dev/null || true)
     if [[ ! "$UPDATE_RESOLVED" =~ ^[0-9a-f]{40}$ ]]; then
       echo -e "${STY_RED}x${STY_RST} Update failed: tracked local branch $UPDATE_LOCAL_TRACK did not resolve." >&2
+      term_spin_stop >/dev/null 2>&1 || true
       exit 1
     fi
     DEPLOY_AT="$UPDATE_RESOLVED"
     UPDATE_DISCOVERED_FROM="local $UPDATE_LOCAL_TRACK"
     UPDATE_PIN_SUFFIX+=" --at $UPDATE_RESOLVED"
-    echo "${STY_FAINT}note: tracking local branch $UPDATE_LOCAL_TRACK (no remote involved).${STY_RST}"
+    term_spin_stop >/dev/null 2>&1 || true
+    echo -e "${STY_FAINT}note: tracking local branch $UPDATE_LOCAL_TRACK (no remote involved).${STY_RST}"
   else
-    echo "${STY_FAINT}note: no remote tracking branch configured; using the local checkout. Pass --at explicitly to pin a revision, or set an upstream to track the fork.${STY_RST}"
+    term_spin_stop >/dev/null 2>&1 || true
+    echo -e "${STY_FAINT}note: no remote tracking branch configured; using the local checkout. Pass --at explicitly to pin a revision, or set an upstream to track the fork.${STY_RST}"
   fi
 fi
 
+term_spin_stop >/dev/null 2>&1 || true
+
 # --- Shared gates: state, target, inputs, plan, decisions, preflight. ---
 # Identical evaluation to every other caller; pure except for reads.
+update_stage "Evaluating update"
 UPDATE_PREP_RC=0
 update_tech deploy_apply_prepare_all || UPDATE_PREP_RC=$?
+term_spin_stop >/dev/null 2>&1 || true
 if (( UPDATE_PREP_RC == 1 )); then
   echo -e "${STY_RED}x${STY_RST} Update failed: could not evaluate the pending update." >&2
   update_show_tech_log
@@ -273,7 +296,7 @@ elif (( UPDATE_PREP_RC != 0 )); then
 fi
 if (( ${#APPLY_DEC_STALE[@]} > 0 )); then
   UPDATE_S=""
-  for UPDATE_S in "${APPLY_DEC_STALE[@]}"; do echo "${STY_FAINT}note: saved choice no longer matches and was ignored: $UPDATE_S${STY_RST}"; done
+  for UPDATE_S in "${APPLY_DEC_STALE[@]}"; do echo -e "${STY_FAINT}note: saved choice no longer matches and was ignored: $UPDATE_S${STY_RST}"; done
 fi
 
 # --- Concise summary of the resolved operation set. ---
@@ -348,6 +371,7 @@ fi
 echo "${UPDATE_N_WRITE} files will change: ${UPDATE_N_UPD} updates, ${UPDATE_N_INS} new, ${UPDATE_N_DEL} deletions, ${UPDATE_N_SIDE} sidecars${UPDATE_KEEP_TXT}"
 
 if (( UPDATE_N_WRITE == 0 )); then
+  setup_launcher_ensure
   echo -e "${STY_GREEN}✓${STY_RST} Already up to date at ${UPDATE_TARGET_SHORT} — nothing to do"
   exit 0
 fi
@@ -357,9 +381,10 @@ if [[ "${DEPLOY_UPDATE_DRYRUN}" == true ]]; then
 fi
 
 # --- Mutation path (the only writer; reached solely through shared gates). ---
-echo "Applying..."
+update_stage "Applying update"
 UPDATE_RUN_RC=0
 update_tech deploy_apply_run_fresh || UPDATE_RUN_RC=$?
+term_spin_stop >/dev/null 2>&1 || true
 if (( UPDATE_RUN_RC != 0 )); then
   echo -e "${STY_RED}x${STY_RST} Update to ${UPDATE_TARGET_SHORT} failed — no further writes attempted." >&2
   echo "  Resume: $0 apply --resume ${APPLY_ID:-<id>} --state-dir $(printf '%q' "$APPLY_SD")" >&2
@@ -378,5 +403,6 @@ if (( UPDATE_VERIFY_RC != 0 )); then
 fi
 UPDATE_DEPLOYED="?"
 UPDATE_DEPLOYED=$(jq -r '.fully_deployed // "?"' "$APPLY_SD/$DEPLOY_IDENTITY_NAME" 2>/dev/null || echo "?")
+setup_launcher_ensure
 echo -e "${STY_GREEN}✓${STY_RST} Updated to ${UPDATE_TARGET_SHORT} — ${UPDATE_N_WRITE} written, ${UPDATE_N_KEEP} kept · fully_deployed=${UPDATE_DEPLOYED}"
 exit 0

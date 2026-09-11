@@ -247,7 +247,8 @@ mkdir -p "$I/sdata/subcmd-adopt" "$I/sdata/subcmd-plan" "$I/sdata/subcmd-decide"
 mkdir -p "$I/sdata/subcmd-apply" "$I/sdata/subcmd-update" "$I/sdata/subcmd-commands"
 cp "$SRC/sdata/deploy/ownership.conf" "$I/sdata/deploy/"
 cp "$SRC/sdata/lib/deploy-common.sh" "$SRC/sdata/lib/deploy-state.sh" "$SRC/sdata/lib/deploy-plan.sh" \
-  "$SRC/sdata/lib/deploy-decide.sh" "$SRC/sdata/lib/deploy-apply.sh" "$I/sdata/lib/"
+  "$SRC/sdata/lib/deploy-decide.sh" "$SRC/sdata/lib/deploy-apply.sh" \
+  "$SRC/sdata/lib/setup-launcher.sh" "$SRC/sdata/lib/terminal-spin.sh" "$I/sdata/lib/"
 cp "$SRC/sdata/subcmd-adopt/options.sh" "$SRC/sdata/subcmd-adopt/0.run.sh" "$I/sdata/subcmd-adopt/"
 cp "$SRC/sdata/subcmd-plan/options.sh" "$SRC/sdata/subcmd-plan/0.run.sh" "$I/sdata/subcmd-plan/"
 cp "$SRC/sdata/subcmd-decide/options.sh" "$SRC/sdata/subcmd-decide/0.run.sh" "$I/sdata/subcmd-decide/"

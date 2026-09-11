@@ -39,6 +39,35 @@ function setup_launcher_install(){
   return 0
 }
 
+# Ensure the launcher for interactive human use. Intended after a
+# successful adopt/update publication: silent when already correct, one
+# note when newly created, warning (still rc 0) when creation fails so a
+# completed deployment never fails over cosmetics. Own machine only —
+# adopting or updating a foreign tree must not touch the operator's bin
+# dir. Expects DEPLOY_HOME, DEPLOY_SELF_HOME, and REPO_ROOT from the
+# caller; styles degrade via defaults when sourced without setup.
+function setup_launcher_ensure(){
+  if [[ "${DEPLOY_HOME:-}" != "${DEPLOY_SELF_HOME:-}" || -z "${DEPLOY_HOME:-}" ]]; then
+    return 0
+  fi
+  local link want cur
+  link="${XDG_BIN_HOME:-$HOME/.local/bin}/${SETUP_GLOBAL_CMD:-impulse}"
+  want="$(readlink -f "$REPO_ROOT/setup" 2>/dev/null || printf '%s' "$REPO_ROOT/setup")"
+  cur=""
+  if [[ -L "$link" ]]; then
+    cur="$(readlink -f "$link" 2>/dev/null || true)"
+  fi
+  if [[ -n "$cur" && "$cur" == "$want" ]]; then
+    return 0
+  fi
+  if setup_launcher_install >/dev/null 2>&1; then
+    echo "${STY_FAINT:-}note: installed the global 'impulse' command — it now works from any directory${STY_RST:-}"
+  else
+    echo "warning: could not install the global 'impulse' launcher; ./setup keeps working" >&2
+  fi
+  return 0
+}
+
 # Remove the launcher, but only when it actually points into this
 # repository. A foreign occupant is never touched.
 function setup_launcher_remove(){

@@ -96,5 +96,82 @@ mkdir -p "$T/fhome/.config/quickshell/ii/modules/common/widgets/shapes"
 [[ ! -e "$T/fstate/applies" && ! -e "$T/fstate/apply.lock" ]] \
   && pass "refusal writes no transaction state" || fail "refusal writes no transaction state"
 
+echo "--- launcher self-delivery in adopt/update ---"
+LR="$T/lrepo"
+mkdir -p "$LR"
+git -C "$LR" init -qb main
+git -C "$LR" config user.email "fixture@example"
+git -C "$LR" config user.name "fixture"
+git -C "$LR" config commit.gpgsign false
+mkdir -p "$LR/dots/.config/app" "$LR/sdata/deploy"
+printf 'managed dots/.config/app .config/app\n' > "$LR/sdata/deploy/ownership.conf"
+printf 'v1\n' > "$LR/dots/.config/app/upd.conf"
+git -C "$LR" add -A
+git -C "$LR" -c user.email=fixture@example -c user.name=fixture -c commit.gpgsign=false commit -qm "launcher rev"
+REV_L0=$(git -C "$LR" rev-parse HEAD)
+OH="$T/ohome"
+mkdir -p "$OH/.config/app" "$OH/.config/illogical-impulse"
+printf 'v1\n' > "$OH/.config/app/upd.conf"
+adopt_own(){
+  (
+    export HOME="$OH" XDG_CONFIG_HOME="$OH/.config" XDG_DATA_HOME="$OH/.local/share" XDG_BIN_HOME="$OH/.local/bin"
+    export REPO_ROOT="$LR" DEPLOY_LIB_DIR="$LIBDIR"
+    unset FONTSET_DIR_NAME INSTALL_VIA_NIX
+    DEPLOY_AT="$REV_L0" DEPLOY_HOME_DIR="$OH" DEPLOY_STATE_DIR=""
+    DEPLOY_WANT_APPLY=true DEPLOY_WANT_STATUS=false DEPLOY_WANT_DRYRUN=false DEPLOY_WANT_RECONCILE=false
+    # shellcheck disable=SC1091
+    source "${HERE}/../../subcmd-adopt/0.run.sh" > /tmp/lc-adopt-own.out 2>&1
+  )
+}
+update_own(){
+  local dry="$1"
+  (
+    export HOME="$OH" XDG_CONFIG_HOME="$OH/.config" XDG_DATA_HOME="$OH/.local/share"
+    export XDG_BIN_HOME="${OWN_BIN_OVERRIDE:-$OH/.local/bin}"
+    export REPO_ROOT="$LR" DEPLOY_LIB_DIR="$LIBDIR"
+    unset FONTSET_DIR_NAME INSTALL_VIA_NIX
+    DEPLOY_AT="HEAD" DEPLOY_HOME_DIR="$OH" DEPLOY_STATE_DIR=""
+    DEPLOY_APPLY_FONTSET=""; DEPLOY_APPLY_FONTSET_SET=false; DEPLOY_APPLY_VIANIX_SET=false
+    DEPLOY_UPDATE_DRYRUN="$dry" DEPLOY_UPDATE_VERBOSE=false
+    declare -a APPLY_RESOLVE=()
+    # shellcheck disable=SC1091
+    source "${HERE}/../../subcmd-update/0.run.sh" > /tmp/lc-update-own.out 2>&1
+  )
+}
+adopt_own
+[[ $? == 0 ]] && pass "own-home adopt exits 0" || fail "own-home adopt exits 0"
+[[ -L "$OH/.local/bin/impulse" ]] && pass "adopt delivers launcher" || fail "adopt delivers launcher"
+[[ "$(readlink -f "$OH/.local/bin/impulse")" == "$(readlink -f "$LR/setup")" ]] \
+  && pass "launcher points at adopted repo" || fail "launcher points at adopted repo"
+grep -q "now works from any directory" /tmp/lc-adopt-own.out \
+  && pass "adopt announces the launcher once" || fail "adopt announces the launcher once"
+rm -f "$OH/.local/bin/impulse"
+printf 'v2\n' > "$LR/dots/.config/app/upd.conf"
+git -C "$LR" add -A
+git -C "$LR" -c user.email=fixture@example -c user.name=fixture -c commit.gpgsign=false commit -qm "launcher delta"
+update_own false
+[[ $? == 0 ]] && pass "own-home update exits 0" || fail "own-home update exits 0"
+[[ "$(cat "$OH/.config/app/upd.conf")" == "v2" ]] && pass "update delivered through lifecycle" || fail "update delivered through lifecycle"
+[[ -L "$OH/.local/bin/impulse" ]] \
+  && pass "update delivers launcher" || fail "update delivers launcher"
+printf 'x' > "$T/binblock"
+OWN_BIN_OVERRIDE="$T/binblock" update_own false
+[[ $? == 0 ]] && grep -q "could not install" /tmp/lc-update-own.out \
+  && pass "launcher failure only warns" || fail "launcher failure only warns"
+unset OWN_BIN_OVERRIDE
+rm -f "$T/binblock"
+mkdir -p "$T/foreign2"
+(
+  export REPO_ROOT="$LR" DEPLOY_LIB_DIR="$LIBDIR"
+  unset FONTSET_DIR_NAME INSTALL_VIA_NIX
+  export XDG_BIN_HOME="$T/fakebin2"
+  DEPLOY_AT="$REV_L0" DEPLOY_HOME_DIR="$T/foreign2" DEPLOY_STATE_DIR="$T/fstate2"
+  DEPLOY_WANT_APPLY=true DEPLOY_WANT_STATUS=false DEPLOY_WANT_DRYRUN=false DEPLOY_WANT_RECONCILE=false
+  # shellcheck disable=SC1091
+  source "${HERE}/../../subcmd-adopt/0.run.sh" > /dev/null 2>&1
+)
+[[ $? == 0 ]] && pass "foreign adopt exits 0" || fail "foreign adopt exits 0"
+[[ ! -e "$T/fakebin2" ]] && pass "foreign adopt leaves bin alone" || fail "foreign adopt leaves bin alone"
+
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" == 0 ]]
