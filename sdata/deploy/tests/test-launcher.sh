@@ -443,5 +443,54 @@ cmp -s "$SH/.profile" /tmp/exp-sh-profile-seed \
 [[ -x "$SH/.local/bin/other-tool" ]] \
   && pass "uninstall keeps unrelated bin entry" || fail "uninstall keeps unrelated bin entry"
 
+echo "--- bash login precedence (pre-existing bash_profile fixture) ---"
+# Real-machine shape: ~/.bash_profile exists, so bash login reads ONLY it
+# (~/.profile is suppressed); the .bashrc early-return guard sits above
+# any appended hook for non-interactive shells. A fixture without
+# .bash_profile would wrongly exercise the ~/.profile fallback instead.
+LP="$T/login-home"
+mkdir -p "$LP/.config/app" "$LP/.config/illogical-impulse" "$LP/.local/bin"
+printf 'v2\n' > "$LP/.config/app/upd.conf"
+printf '# user bashrc\n[[ $- != *i* ]] && return\n' > "$LP/.bashrc"
+printf '#\n# ~/.bash_profile\n#\n\n[[ -f ~/.bashrc ]] && . ~/.bashrc\n' > "$LP/.bash_profile"
+printf '. "$HOME/.cargo/env"\n' > "$LP/.profile"
+LP_HOOK="$( (export HOME="$LP" XDG_DATA_HOME="$LP/.local/share" XDG_BIN_HOME="$LP/.local/bin"; setup_sh_hook_line) )"
+printf '# user bashrc\n[[ $- != *i* ]] && return\n\n%s\n' "$LP_HOOK" > /tmp/exp-lp-bashrc
+printf '#\n# ~/.bash_profile\n#\n\n[[ -f ~/.bashrc ]] && . ~/.bashrc\n\n%s\n' "$LP_HOOK" > /tmp/exp-lp-bash-profile
+printf '. "$HOME/.cargo/env"\n\n%s\n' "$LP_HOOK" > /tmp/exp-lp-profile
+(cd /tmp && HOME="$LP" XDG_CONFIG_HOME="$LP/.config" XDG_DATA_HOME="$LP/.local/share" \
+  XDG_BIN_HOME="$LP/.local/bin" "$LR/setup" adopt --apply --at HEAD --home "$LP" --state-dir "$LP/.config/illogical-impulse" </dev/null > /dev/null 2>&1)
+[[ $? == 0 ]] && pass "login-model adopt exits 0" || fail "login-model adopt exits 0"
+(cd /tmp && HOME="$LP" XDG_CONFIG_HOME="$LP/.config" XDG_DATA_HOME="$LP/.local/share" \
+  XDG_BIN_HOME="$LP/.local/bin" "$LR/setup" update --home "$LP" --state-dir "$LP/.config/illogical-impulse" </dev/null > /tmp/lc-lp-update.out 2>&1)
+[[ $? == 0 ]] && pass "login-model noop update exits 0" || fail "login-model noop update exits 0"
+[[ "$(grep -cFx -e "$LP_HOOK" "$LP/.bash_profile" 2>/dev/null)" == "1" ]] \
+  && pass "login target hooked exactly once" || fail "login target hooked exactly once"
+[[ "$(grep -cFx -e "$LP_HOOK" "$LP/.bashrc" 2>/dev/null)" == "1" && "$(grep -cFx -e "$LP_HOOK" "$LP/.profile" 2>/dev/null)" == "1" ]] \
+  && pass "bashrc and profile hooked exactly once" || fail "bashrc and profile hooked exactly once"
+cmp -s "$LP/.bash_profile" /tmp/exp-lp-bash-profile \
+  && pass "bash_profile bytes preserved around hook" || fail "bash_profile bytes preserved around hook"
+cmp -s "$LP/.bashrc" /tmp/exp-lp-bashrc && cmp -s "$LP/.profile" /tmp/exp-lp-profile \
+  && pass "bashrc/profile bytes preserved around hook" || fail "bashrc/profile bytes preserved around hook"
+[[ "$(env -i HOME="$LP" USER=test PATH="/usr/bin:/bin" bash --login -c 'command -v impulse' 2>/dev/null)" == "$LP/.local/bin/impulse" ]] \
+  && pass "login bash resolves impulse with bash_profile present" || fail "login bash resolves impulse with bash_profile present"
+[[ "$(env -i HOME="$LP" USER=test PATH="/usr/bin:/bin" bash -i -c 'command -v impulse' 2>/dev/null)" == "$LP/.local/bin/impulse" ]] \
+  && pass "interactive bash resolves impulse" || fail "interactive bash resolves impulse"
+[[ "$(env -i HOME="$LP" USER=test PATH="/usr/bin:/bin" bash --login -i -c 'echo $PATH' 2>/dev/null)" != *"$LP/.local/bin:$LP/.local/bin"* ]] \
+  && pass "no duplicate PATH entries across hooks" || fail "no duplicate PATH entries across hooks"
+(cd /tmp && HOME="$LP" XDG_CONFIG_HOME="$LP/.config" XDG_DATA_HOME="$LP/.local/share" \
+  XDG_BIN_HOME="$LP/.local/bin" "$LR/setup" update --home "$LP" --state-dir "$LP/.config/illogical-impulse" </dev/null > /dev/null 2>&1)
+[[ "$(grep -cFx -e "$LP_HOOK" "$LP/.bash_profile")" == "1" && "$(grep -cFx -e "$LP_HOOK" "$LP/.bashrc")" == "1" ]] \
+  && pass "repeat update stays idempotent" || fail "repeat update stays idempotent"
+(
+  export HOME="$LP" XDG_CONFIG_HOME="$LP/.config" XDG_DATA_HOME="$LP/.local/share" XDG_BIN_HOME="$LP/.local/bin" REPO_ROOT="$LR"
+  setup_launcher_remove > /dev/null 2>&1
+)
+printf '# user bashrc\n[[ $- != *i* ]] && return\n' > /tmp/exp-lp-bashrc-seed
+printf '#\n# ~/.bash_profile\n#\n\n[[ -f ~/.bashrc ]] && . ~/.bashrc\n' > /tmp/exp-lp-bash-profile-seed
+printf '. "$HOME/.cargo/env"\n' > /tmp/exp-lp-profile-seed
+cmp -s "$LP/.bashrc" /tmp/exp-lp-bashrc-seed && cmp -s "$LP/.bash_profile" /tmp/exp-lp-bash-profile-seed && cmp -s "$LP/.profile" /tmp/exp-lp-profile-seed \
+  && pass "uninstall restores all login files exactly" || fail "uninstall restores all login files exactly"
+
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" == 0 ]]

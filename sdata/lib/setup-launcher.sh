@@ -12,8 +12,12 @@
 # state converges file by file):
 #   fish  whole-file-owned drop-in under fish/conf.d (native extension
 #         point; read by every new fish, login or not).
-#   bash  one hook line in ~/.bashrc (interactive terminals) sourcing the
-#         owned env.sh below.
+#   bash  one hook line in ~/.bashrc (interactive terminals) plus one in
+#         the login file bash itself prefers (~/.bash_profile, else
+#         ~/.bash_login, else ~/.profile): a present bash_profile
+#         suppresses ~/.profile entirely, and rc early-return guards can
+#         sit above an appended hook. Both hooks only prepend PATH when
+#         missing, so a session sourcing both stays duplicate-free.
 #   sh    one hook line in ~/.profile (login shells; also the fallback
 #         bash reads when no ~/.bash_profile exists).
 #   zsh   one hook line in ~/.zshrc and ~/.zprofile (ZDOTDIR-aware).
@@ -256,11 +260,29 @@ function setup_hook_remove(){
 }
 
 # rc files per shell family. ZDOTDIR-aware for zsh; bash/profile live
-# directly under $HOME (bash has no relocatable dotdir).
+# directly under $HOME (bash has no relocatable dotdir). bash additionally
+# covers its login target (first file bash itself would read), because a
+# present ~/.bash_profile suppresses ~/.profile entirely and rc guards
+# (`[[ $- != *i* ]] && return`) can sit above an appended hook.
+setup_bash_login_file(){
+  if [[ -f "$HOME/.bash_profile" ]]; then
+    printf '%s' "$HOME/.bash_profile"
+  elif [[ -f "$HOME/.bash_login" ]]; then
+    printf '%s' "$HOME/.bash_login"
+  else
+    printf '%s' "$HOME/.profile"
+  fi
+}
+
 setup_shell_rc_files(){
-  local shell="$1"
+  local shell="$1" login
   case "$shell" in
-    bash) printf '%s\n' "$HOME/.bashrc";;
+    bash)
+      printf '%s\n' "$HOME/.bashrc"
+      login="$(setup_bash_login_file)"
+      if [[ "$login" != "$HOME/.profile" ]]; then
+        printf '%s\n' "$login"
+      fi;;
     profile) printf '%s\n' "$HOME/.profile";;
     zsh) printf '%s\n' "${ZDOTDIR:-$HOME}/.zshrc" "${ZDOTDIR:-$HOME}/.zprofile";;
   esac
@@ -314,10 +336,14 @@ function setup_shells_ensure(){
 }
 
 # Sweep every shell artifact unconditionally (no installed-gates: removal
-# must also catch shells uninstalled since integration). Owned-only.
+# must also catch shells uninstalled since integration). Owned-only. The
+# bash login candidates are all swept: whichever one was the target when
+# integration ran may no longer be.
 function setup_shells_remove(){
   local rc
   setup_hook_remove "$HOME/.bashrc"
+  setup_hook_remove "$HOME/.bash_profile"
+  setup_hook_remove "$HOME/.bash_login"
   setup_hook_remove "$HOME/.profile"
   setup_hook_remove "${ZDOTDIR:-$HOME}/.zshrc"
   setup_hook_remove "${ZDOTDIR:-$HOME}/.zprofile"

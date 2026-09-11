@@ -158,11 +158,13 @@ The launcher is a symlink in `~/.local/bin` plus per-shell `PATH`
 integration, all project-owned and reversible: a fish drop-in
 (`~/.config/fish/conf.d/impulse-path.fish`), and one hook line in
 `~/.bashrc`, `~/.profile`, and — when zsh is installed — `~/.zshrc` /
-`~/.zprofile`, sourcing one owned env file. Every new shell picks it up
-with no reload or restart (the shell you ran the install from needs a
-fresh session). Uninstall removes only what it owns; anything else is
-left alone. Nushell is not auto-managed (no interpreter here to validate
-against) — manually prepend `~/.local/bin` to its `PATH` once.
+`~/.zprofile`, sourcing one owned env file. Bash login uses whichever of
+`~/.bash_profile`, `~/.bash_login`, `~/.profile` it would read first, so a
+pre-existing login file never suppresses the integration. Every new shell
+picks it up with no reload or restart (the shell you ran the install from
+needs a fresh session). Uninstall removes only what it owns; anything
+else is left alone. Nushell is not auto-managed (no interpreter here to
+validate against) — manually prepend `~/.local/bin` to its `PATH` once.
 
 `update` only touches fork-managed files. User- and runtime-owned state
 is left alone, and anything locally different that needs a human call
