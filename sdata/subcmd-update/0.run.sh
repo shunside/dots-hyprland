@@ -115,6 +115,69 @@ update_show_tech_log(){
   return 0
 }
 
+# Checkpoint: live payload fully evaluated against APPLY_TARGET (applied
+# and verified, or cleanly noop). Identity-only, journal and manifest
+# untouched; gives the next run an honest base instead of stale apply
+# provenance. Never reached by dry runs, refusals, or failures. Atomic
+# rewrite; concurrent runs converge on the same value.
+update_record_verified(){
+  [[ -n "${APPLY_TARGET:-}" ]] || return 0
+  local ident tmp now
+  ident="$APPLY_SD/$DEPLOY_IDENTITY_NAME"
+  [[ -f "$ident" ]] || return 0
+  now="$(date -u +%FT%TZ 2>/dev/null || date 2>/dev/null || true)"
+  tmp="$(mktemp "${TMPDIR:-/tmp}/setup-verified-XXXXXX.json" 2>/dev/null)" || return 0
+  if jq --arg t "$APPLY_TARGET" --arg ts "$now" \
+       '.last_verified = {target: $t, at: $ts}' "$ident" > "$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$ident" 2>/dev/null || rm -f "$tmp" || true
+  else
+    rm -f "$tmp" || true
+  fi
+  return 0
+}
+
+# Advance the checkout branch to the fetched target when safe: default
+# discovery flow only (never explicit --at, never dry run), on a branch
+# (never detached), tracking exactly the ref just fetched, and only from
+# a remote (never a local branch). git's own fast-forward rules decide:
+# dirty/diverged/local-ahead trees refuse by themselves and fall back to
+# handoff behavior. Reports only an actual pointer change.
+update_advance_checkout(){
+  [[ "${DEPLOY_UPDATE_AT_GIVEN:-false}" == true ]] && return 0
+  [[ "${DEPLOY_UPDATE_DRYRUN:-false}" == true ]] && return 0
+  [[ -z "${UPDATE_DISCOVERED_FROM:-}" || "$UPDATE_DISCOVERED_FROM" == local* ]] && return 0
+  [[ -z "${UPDATE_REMOTE:-}" || -z "${UPDATE_BRANCH:-}" ]] && return 0
+  git -C "$REPO_ROOT" symbolic-ref -q HEAD >/dev/null 2>&1 || return 0
+  local up
+  up="$(git -C "$REPO_ROOT" rev-parse --symbolic-full-name "@{u}" 2>/dev/null || true)"
+  [[ "$up" == "refs/remotes/$UPDATE_REMOTE/$UPDATE_BRANCH" ]] || return 0
+  local before after
+  before="$(git -C "$REPO_ROOT" rev-parse --verify HEAD^{commit} 2>/dev/null || true)"
+  git -C "$REPO_ROOT" merge --ff-only --quiet "$UPDATE_REMOTE/$UPDATE_BRANCH" 2>/dev/null || return 0
+  after="$(git -C "$REPO_ROOT" rev-parse --verify HEAD^{commit} 2>/dev/null || true)"
+  if [[ -n "$before" && -n "$after" && "$before" != "$after" ]]; then
+    local bs as
+    bs="$(git -C "$REPO_ROOT" rev-parse --short "$before" 2>/dev/null || printf '%s' "${before:0:7}")"
+    as="$(git -C "$REPO_ROOT" rev-parse --short "$after" 2>/dev/null || printf '%s' "${after:0:7}")"
+    echo "Advanced checkout ${bs} -> ${as}"
+  fi
+  return 0
+}
+
+# Evaluation scope header shared by every non-steady shape: which payload
+# window is being reconciled with which target, plus divergence context.
+update_scope_head(){
+  echo -e "Updating payload ${UPDATE_BASE_SHORT} ${STY_FAINT}->${STY_RST} ${STY_BOLD}${UPDATE_TARGET_SHORT}${STY_RST}${UPDATE_TARGET_WHENCE:-}"
+  # Local-only commits never ride along implicitly: name them instead.
+  if [[ -n "${UPDATE_DISCOVERED_FROM:-}" && "$UPDATE_DISCOVERED_FROM" != local* ]]; then
+    UPDATE_AHEAD=0
+    UPDATE_AHEAD=$(git -C "$REPO_ROOT" rev-list --count "$APPLY_TARGET..HEAD" 2>/dev/null || echo 0)
+    if [[ "$UPDATE_AHEAD" =~ ^[0-9]+$ ]] && (( UPDATE_AHEAD > 0 )); then
+      echo -e "${STY_FAINT}note: local branch holds $UPDATE_AHEAD commit(s) not on $UPDATE_DISCOVERED_FROM; deploying the remote tip, local work untouched.${STY_RST}"
+    fi
+  fi
+}
+
 # --- Read-only state gates (no writes, not even the lock). ---
 UPDATE_LOCK="$APPLY_SD/$DEPLOY_LOCK_NAME"
 if [[ -f "$UPDATE_LOCK" ]]; then
@@ -175,6 +238,7 @@ fi
 # and divergence reporting describe the same pinned target.
 UPDATE_DISCOVERED_FROM="${UPDATE_DISCOVERED_FROM:-}"
 UPDATE_TARGET_WHENCE="${UPDATE_TARGET_WHENCE:-}"
+UPDATE_FETCH_MOVED="${UPDATE_FETCH_MOVED:-false}"
 UPDATE_PIN_SUFFIX="$UPDATE_SUFFIX"
 if [[ "${UPDATE_HANDED_OFF:-false}" == true ]]; then
   # Handoff runs arrive with an explicitly pinned target but must still
@@ -230,6 +294,7 @@ if [[ "${DEPLOY_UPDATE_AT_GIVEN:-false}" != true ]]; then
         UPDATE_FETCH_BEFORE_SHORT=$(git -C "$REPO_ROOT" rev-parse --short "$UPDATE_FETCH_BEFORE" 2>/dev/null || printf '%s' "${UPDATE_FETCH_BEFORE:0:7}")
         UPDATE_FETCH_AFTER_SHORT=$(git -C "$REPO_ROOT" rev-parse --short "$UPDATE_RESOLVED" 2>/dev/null || printf '%s' "${UPDATE_RESOLVED:0:7}")
         echo -e "${STY_FAINT}note: fetched $UPDATE_REMOTE/$UPDATE_BRANCH ${UPDATE_FETCH_BEFORE_SHORT} -> ${UPDATE_FETCH_AFTER_SHORT}${STY_RST}"
+        UPDATE_FETCH_MOVED=true
       fi
     fi
   elif [[ "$UPDATE_UPSTREAM" == refs/heads/* ]]; then
@@ -296,7 +361,7 @@ if [[ "${DEPLOY_UPDATE_AT_GIVEN:-false}" != true && -n "${UPDATE_DISCOVERED_FROM
     else
       UPDATE_HEAD_SHORT="unknown"
     fi
-    echo "Handed off to updater ${UPDATE_HANDOFF_SHORT} (checkout at ${UPDATE_HEAD_SHORT} stays untouched)"
+    echo "Handed off to updater ${UPDATE_HANDOFF_SHORT} (checkout ${UPDATE_HEAD_SHORT} evaluated as-is)"
     (
       # Pin the full driver contract explicitly: the inner runner belongs
       # to another revision and may expect variables this runner never
@@ -323,6 +388,12 @@ if [[ "${DEPLOY_UPDATE_AT_GIVEN:-false}" != true && -n "${UPDATE_DISCOVERED_FROM
       source "$UPDATE_HANDOFF_DIR/sdata/subcmd-update/0.run.sh"
     ) || UPDATE_HANDOFF_RC=$?
     rm -rf "$UPDATE_HANDOFF_DIR" || true
+    # The inner run evaluated, deployed, verified, recorded, and ensured
+    # on its own; the outer run only maintains the checkout itself, on
+    # success, with the discovery context gathered above.
+    if (( UPDATE_HANDOFF_RC == 0 )); then
+      update_advance_checkout || true
+    fi
     exit "$UPDATE_HANDOFF_RC"
   fi
 fi
@@ -436,15 +507,20 @@ for ((UPDATE_SUM_I = 0; UPDATE_SUM_I < ${#DEPLOY_PLAN_ROWS[@]}; UPDATE_SUM_I++))
   esac
 done
 UPDATE_N_WRITE=$((UPDATE_N_UPD + UPDATE_N_INS + UPDATE_N_DEL + UPDATE_N_SIDE))
-# User-facing "from" revision: the last successfully applied target when
-# one is recorded, else the adoption baseline. Presentation only — the
-# planner keeps reasoning from PLAN_BASE_REV, whose provenance meaning
-# ("baselined against") is unchanged. Guarded: an unreadable identity
-# falls back to the baseline instead of failing the summary.
+# User-facing base: the freshest confirmed payload state — last verified
+# target when one is recorded, else the last applied target, else the
+# adoption baseline. Presentation only; the planner keeps reasoning from
+# PLAN_BASE_REV, whose provenance meaning ("baselined against") is
+# unchanged. Recovery history (last_apply, journal, manifest) is never
+# rewritten here.
 UPDATE_FROM_REV="$PLAN_BASE_REV"
+UPDATE_LAST_VERIFIED=""
+UPDATE_LAST_VERIFIED=$(jq -r '.last_verified.target // empty' "$APPLY_SD/$DEPLOY_IDENTITY_NAME" 2>/dev/null || true)
 UPDATE_LAST_APPLIED=""
 UPDATE_LAST_APPLIED=$(jq -r '.last_apply.target // empty' "$APPLY_SD/$DEPLOY_IDENTITY_NAME" 2>/dev/null || true)
-if [[ -n "$UPDATE_LAST_APPLIED" ]]; then
+if [[ -n "$UPDATE_LAST_VERIFIED" ]]; then
+  UPDATE_FROM_REV="$UPDATE_LAST_VERIFIED"
+elif [[ -n "$UPDATE_LAST_APPLIED" ]]; then
   UPDATE_FROM_REV="$UPDATE_LAST_APPLIED"
 fi
 UPDATE_BASE_SHORT=$(git -C "$REPO_ROOT" rev-parse --short "$UPDATE_FROM_REV" 2>/dev/null || printf '%s' "${UPDATE_FROM_REV:0:7}")
@@ -453,31 +529,54 @@ UPDATE_KEEP_TXT=""
 if (( UPDATE_N_KEEP > 0 )); then
   UPDATE_KEEP_TXT=" · ${UPDATE_N_KEEP} kept as-is by your decisions"
 fi
-# The summary speaks in dimensions so a zero in one cannot deny work in
-# another. Payload counts cover managed-payload writes only; discovery
-# (fetch), delegation (handoff), and launcher repair report on their own
-# lines above and below. The verdict claims no more than evaluated state.
-echo -e "Updating payload ${UPDATE_BASE_SHORT} ${STY_FAINT}->${STY_RST} ${STY_BOLD}${UPDATE_TARGET_SHORT}${STY_RST}${UPDATE_TARGET_WHENCE:-}"
-# Local-only commits never ride along implicitly: name them instead.
-if [[ -n "${UPDATE_DISCOVERED_FROM:-}" && "$UPDATE_DISCOVERED_FROM" != local* ]]; then
-  UPDATE_AHEAD=0
-  UPDATE_AHEAD=$(git -C "$REPO_ROOT" rev-list --count "$APPLY_TARGET..HEAD" 2>/dev/null || echo 0)
-  if [[ "$UPDATE_AHEAD" =~ ^[0-9]+$ ]] && (( UPDATE_AHEAD > 0 )); then
-    echo -e "${STY_FAINT}note: local branch holds $UPDATE_AHEAD commit(s) not on $UPDATE_DISCOVERED_FROM; deploying the remote tip, local work untouched.${STY_RST}"
+UPDATE_PAYLOAD_LINE="Payload: ${UPDATE_N_WRITE} files to deploy (${UPDATE_N_UPD} updates, ${UPDATE_N_INS} new, ${UPDATE_N_DEL} deletions, ${UPDATE_N_SIDE} sidecars)${UPDATE_KEEP_TXT}"
+
+# Dry runs evaluate only: full narrative, zero writes of any kind — no
+# verification record, no checkout advance, no launcher lifecycle. A clean
+# dry run still reports its finding (already- vs up-to-date), followed by
+# the explicit dry disclaimer.
+if [[ "${DEPLOY_UPDATE_DRYRUN:-false}" == true ]]; then
+  update_scope_head
+  echo "$UPDATE_PAYLOAD_LINE"
+  if (( UPDATE_N_WRITE == 0 )); then
+    UPDATE_HEAD_NOW=""
+    UPDATE_HEAD_NOW=$(git -C "$REPO_ROOT" rev-parse --verify HEAD^{commit} 2>/dev/null || true)
+    if [[ "${UPDATE_HANDED_OFF:-false}" != true && "${UPDATE_FETCH_MOVED:-false}" != true ]] \
+      && [[ -n "$UPDATE_HEAD_NOW" && -n "${APPLY_TARGET:-}" && "$UPDATE_HEAD_NOW" == "$APPLY_TARGET" ]]; then
+      echo -e "${STY_GREEN}✓${STY_RST} Already up to date at ${UPDATE_TARGET_SHORT} — payload matches, nothing to deploy"
+    else
+      echo -e "${STY_GREEN}✓${STY_RST} Up to date at ${UPDATE_TARGET_SHORT} — payload matches, nothing to deploy"
+    fi
   fi
+  echo "dry run: showing the above without applying anything (nothing changed)"
+  exit 0
 fi
-echo "Payload: ${UPDATE_N_WRITE} files to deploy (${UPDATE_N_UPD} updates, ${UPDATE_N_INS} new, ${UPDATE_N_DEL} deletions, ${UPDATE_N_SIDE} sidecars)${UPDATE_KEEP_TXT}"
 
 if (( UPDATE_N_WRITE == 0 )); then
-  # Dry runs change nothing at all, including the launcher lifecycle.
-  # The `:` keeps this branch non-empty for tooling that strips the
-  # ensure call to model pre-launcher runners (an if with no commands
-  # is a bash syntax error, comments included).
-  if [[ "${DEPLOY_UPDATE_DRYRUN:-false}" != true ]]; then
-    : "real run"
-    setup_launcher_ensure
+  update_record_verified || true
+  update_advance_checkout || true
+  # Launcher repair is captured, not just printed: a repaired launcher
+  # means this run did work, so the verdict below must not claim a pure
+  # steady state.
+  UPDATE_LAUNCHER_OUT=""
+  UPDATE_LAUNCHER_OUT="$(setup_launcher_ensure 2>&1)" || true
+  UPDATE_LAUNCHER_REPAIRED=false
+  if [[ -n "$UPDATE_LAUNCHER_OUT" ]]; then
+    UPDATE_LAUNCHER_REPAIRED=true
   fi
-  echo -e "${STY_GREEN}✓${STY_RST} Already up to date at ${UPDATE_TARGET_SHORT} — payload matches, nothing to deploy"
+  UPDATE_HEAD_NOW=""
+  UPDATE_HEAD_NOW=$(git -C "$REPO_ROOT" rev-parse --verify HEAD^{commit} 2>/dev/null || true)
+  # Steady state: payload matches, checkout at target, tracking ref
+  # unmoved, no delegation, launcher converged. Only then does the run
+  # collapse to a single verdict line instead of an update narrative.
+  if [[ "${UPDATE_HANDED_OFF:-false}" != true && "${UPDATE_FETCH_MOVED:-false}" != true ]] \
+    && [[ "$UPDATE_LAUNCHER_REPAIRED" != true ]] \
+    && [[ -n "$UPDATE_HEAD_NOW" && -n "${APPLY_TARGET:-}" && "$UPDATE_HEAD_NOW" == "$APPLY_TARGET" ]]; then
+    echo -e "${STY_GREEN}✓${STY_RST} Already up to date at ${UPDATE_TARGET_SHORT} — payload matches, nothing to deploy"
+    exit 0
+  fi
+  update_scope_head
+  echo "$UPDATE_PAYLOAD_LINE"
   # Deployment state and tool revision are distinct: the payload can be
   # current while the checkout's own updater lags the deployed target
   # (explicit --at always runs local logic by design). Handoff-inner runs
@@ -491,14 +590,16 @@ if (( UPDATE_N_WRITE == 0 )); then
       echo -e "${STY_FAINT}note: this updater itself is running from ${UPDATE_RUNNER_SHORT}, not ${UPDATE_TARGET_SHORT} — payload is current, tool revision differs.${STY_RST}"
     fi
   fi
-  exit 0
-fi
-if [[ "${DEPLOY_UPDATE_DRYRUN:-false}" == true ]]; then
-  echo "dry run: showing the above without applying anything (nothing changed)"
+  if [[ "$UPDATE_LAUNCHER_REPAIRED" == true ]]; then
+    printf '%s\n' "$UPDATE_LAUNCHER_OUT"
+  fi
+  echo -e "${STY_GREEN}✓${STY_RST} Up to date at ${UPDATE_TARGET_SHORT} — payload matches, nothing to deploy"
   exit 0
 fi
 
 # --- Mutation path (the only writer; reached solely through shared gates). ---
+update_scope_head
+echo "$UPDATE_PAYLOAD_LINE"
 update_stage "Applying update"
 UPDATE_RUN_RC=0
 update_tech deploy_apply_run_fresh || UPDATE_RUN_RC=$?
@@ -521,6 +622,8 @@ if (( UPDATE_VERIFY_RC != 0 )); then
 fi
 UPDATE_DEPLOYED="?"
 UPDATE_DEPLOYED=$(jq -r '.fully_deployed // "?"' "$APPLY_SD/$DEPLOY_IDENTITY_NAME" 2>/dev/null || echo "?")
+update_record_verified || true
+update_advance_checkout || true
 setup_launcher_ensure
 echo -e "${STY_GREEN}✓${STY_RST} Updated to ${UPDATE_TARGET_SHORT} — ${UPDATE_N_WRITE} written, ${UPDATE_N_KEEP} kept · fully_deployed=${UPDATE_DEPLOYED}"
 exit 0

@@ -306,7 +306,8 @@ rm -f "$PH/.config/fish/conf.d/impulse-path.fish"
 (cd /tmp && HOME="$PH" XDG_CONFIG_HOME="$PH/.config" XDG_DATA_HOME="$PH/.local/share" \
   XDG_BIN_HOME="$PH/.local/bin" "$LR/setup" update --home "$PH" --state-dir "$PH/.config/illogical-impulse" </dev/null > /tmp/lc-partial-a.out 2>&1)
 [[ $? == 0 ]] && pass "partial-state noop update exits 0" || fail "partial-state noop update exits 0"
-grep -q "Already up to date" /tmp/lc-partial-a.out \
+# Repair work happened, so the verdict is became-current, not already-.
+grep -q "^✓ Up to date at " /tmp/lc-partial-a.out && ! grep -q "Already" /tmp/lc-partial-a.out \
   && pass "partial-state run is a payload noop" || fail "partial-state run is a payload noop"
 [[ -f "$PH/.config/fish/conf.d/impulse-path.fish" ]] \
   && pass "noop update repairs the missing drop-in" || fail "noop update repairs the missing drop-in"

@@ -2,9 +2,12 @@
 #
 # Fixture tests for `setup update` remote discovery: the default update
 # resolves the branch's tracking branch over the network (fetch only),
-# pins the fetched commit, and deploys it; explicit --at stays fully
-# local. Uses a local bare repo as the "remote", so no network is needed
-# and file:// transport cannot leak anywhere real. Everything under $T.
+# pins the fetched commit, and deploys it; a successful run then advances
+# a clean tracking checkout to the verified target (fast-forward only;
+# dirty/diverged checkouts stay put and keep working through handoff).
+# Explicit --at stays fully local. Uses a local bare repo as the
+# "remote", so no network is needed and file:// transport cannot leak
+# anywhere real. Everything under $T.
 # This file is safe to run from any working directory (all paths absolute
 # or repo-anchored); that itself exercises cwd independence.
 
@@ -148,13 +151,19 @@ grep -q "(latest on origin/main)" /tmp/updr-ahead.out \
   && pass "summary names the discovery source" || fail "summary names the discovery source"
 [[ "$(cat "$T/ahead-home/.config/app/upd.conf")" == "v3-remote" ]] \
   && pass "fetched content deployed" || fail "fetched content deployed"
-[[ "$(git -C "$R" rev-parse HEAD)" == "$REV_T" ]] \
-  && pass "local branch never moved" || fail "local branch never moved"
+# Discovery itself never moves the branch (fetch-only); the successful run
+# then advances the clean tracking checkout to the target it verified.
+[[ "$(git -C "$R" rev-parse HEAD)" == "$REV_U" ]] \
+  && pass "clean checkout advanced to target" || fail "clean checkout advanced to target"
+grep -q "^Advanced checkout " /tmp/updr-ahead.out \
+  && pass "checkout advance is reported" || fail "checkout advance is reported"
 
 echo "--- already-current after fetching ---"
 update_run "" "$T/ahead-home" "$T/ahead-state" > /tmp/updr-current.out 2>&1
 [[ $? == 0 ]] && grep -q "Already up to date" /tmp/updr-current.out \
-  && pass "second update is a noop" || fail "second update is a noop"
+  && pass "second update is a steady noop" || fail "second update is a steady noop"
+[[ "$(grep -c '^Updating ' /tmp/updr-current.out)" == "0" ]] \
+  && pass "steady run skips the update narrative" || fail "steady run skips the update narrative"
 
 echo "--- offline failure is safe and explicit ---"
 fresh_case offline
@@ -181,6 +190,8 @@ update_run "" "$T/dirty-home" "$T/dirty-state" > /tmp/updr-dirty.out 2>&1
   && pass "dirty run still deploys" || fail "dirty run still deploys"
 grep -q "local comment" "$R/dots/.config/app/keep.conf" && [[ -f "$R/dots/.config/app/scratch.txt" ]] \
   && pass "worktree dirt survives the fetch" || fail "worktree dirt survives the fetch"
+[[ "$(git -C "$R" rev-parse HEAD)" == "$REV_U2" ]] \
+  && pass "benign dirt does not block the advance" || fail "benign dirt does not block the advance"
 git -C "$R" checkout -q -- dots/.config/app/keep.conf
 rm -f "$R/dots/.config/app/scratch.txt"
 
@@ -198,6 +209,11 @@ grep -q "1 commit(s) not on origin/main" /tmp/updr-div.out \
   && pass "remote tip deployed over divergence" || fail "remote tip deployed over divergence"
 git -C "$R" log --oneline | grep -q "local-only tweak" \
   && pass "local commit untouched" || fail "local commit untouched"
+if grep -q "^Advanced checkout" /tmp/updr-div.out; then
+  fail "diverged checkout never advances"
+else
+  pass "diverged checkout never advances"
+fi
 
 echo "--- no tracking branch falls back loudly ---"
 fresh_case notrack

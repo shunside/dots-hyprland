@@ -2,15 +2,15 @@
 #
 # Fixture tests for update self-update handoff: a stale checkout's own
 # entrypoint must end up executing the pinned target revision's updater
-# implementation, without moving the checkout.
+# implementation when the checkout cannot follow it itself.
 #
 # The "stale" tree is built mechanically, never hand-written: full current
 # sdata with exactly the handoff block and the launcher-ensure calls
-# removed from a copy of subcmd-update/0.run.sh. That is a faithful
-# pre-handoff updater (same gates, same engine), so any behavioral delta
-# after handoff proves the target implementation took over. Anchor counts
-# are asserted: silent anchor drift fails here instead of testing
-# something unintended. Only file:// transports are used.
+# removed from a copy of subcmd-update/0.run.sh. That is a handoff-unaware
+# runner on otherwise shared tails (gates, record, fast-forward, steady
+# verdicts), so any delegation line proves the target implementation took
+# over. Anchor counts are asserted: silent anchor drift fails here instead
+# of testing something unintended. Only file:// transports are used.
 
 set -uo pipefail
 
@@ -49,9 +49,10 @@ t = p.read_text()
 start, end = '# --- Self-update handoff', '# --- End self-update handoff. ---'
 assert t.count(start) == 1 and t.count(end) == 1, "handoff anchors drifted"
 t = t[:t.index(start)] + t[t.index(end) + len(end):]
-calls = [l for l in t.split('\n') if l.strip() == 'setup_launcher_ensure']
+# Any line invoking ensure (bare or captured) belongs to the launcher era.
+calls = [l for l in t.split('\n') if 'setup_launcher_ensure' in l and not l.strip().startswith('#')]
 assert len(calls) == 2, "ensure call sites drifted"
-t = '\n'.join(l for l in t.split('\n') if l.strip() != 'setup_launcher_ensure')
+t = '\n'.join(l for l in t.split('\n') if not ('setup_launcher_ensure' in l and not l.strip().startswith('#')))
 p.write_text(t)
 print("stripped stale runner")
 EOF
@@ -109,22 +110,31 @@ adopt_at "$H" "$S0"
 [[ $? == 0 ]] && pass "stale-tree adopt exits 0" || fail "stale-tree adopt exits 0"
 ln -s "$R/setup" "$BIN/impulse"
 
-echo "--- stale checkout hands off and deploys the pinned target ---"
+echo "--- stale checkout follows the target without handoff ---"
 printf 'v2\n' > "$W/dots/.config/app/upd.conf"
 cp "$SRC/sdata/subcmd-update/0.run.sh" "$W/sdata/subcmd-update/0.run.sh"
 git -C "$W" add -A
 git -C "$W" -c user.email=fixture@example -c user.name=fixture -c commit.gpgsign=false commit -qm "target implementation"
 git -C "$W" push -q origin main 2>/dev/null
 S1=$(git -C "$W" rev-parse HEAD)
+S1_SHORT=$(git -C "$W" rev-parse --short HEAD)
 old_update "$H" > /tmp/hand-core.out 2>&1
 [[ $? == 0 ]] && pass "stale entrypoint update exits 0" || fail "stale entrypoint update exits 0: $(tail -n 3 /tmp/hand-core.out)"
 [[ "$(cat "$H/.config/app/upd.conf")" == "v2" ]] && pass "pinned target payload deployed" || fail "pinned target payload deployed"
-[[ -L "$H/.local/bin/impulse" ]] && pass "target lifecycle behavior took effect" || fail "target lifecycle behavior took effect"
+[[ -L "$H/.local/bin/impulse" ]] && pass "adopt delivered the launcher" || fail "adopt delivered the launcher"
 [[ "$(readlink -f "$H/.local/bin/impulse")" == "$(readlink -f "$R/setup")" ]] \
   && pass "launcher points at checkout, not tempdir" || fail "launcher points at checkout, not tempdir"
-[[ "$(git -C "$R" rev-parse HEAD)" == "$S0" ]] && pass "checkout HEAD unmoved" || fail "checkout HEAD unmoved"
-[[ -z "$(git -C "$R" status --porcelain=v1)" ]] && pass "checkout worktree untouched" || fail "checkout worktree untouched"
-[[ "$(cat "$R/dots/.config/app/upd.conf")" == "v1" ]] && pass "checkout payload unread, not advanced" || fail "checkout payload unread, not advanced"
+[[ "$(git -C "$R" rev-parse HEAD)" == "$S1" ]] \
+  && pass "clean checkout advanced to target" || fail "clean checkout advanced to target"
+[[ -z "$(git -C "$R" status --porcelain=v1)" ]] && pass "checkout worktree clean" || fail "checkout worktree clean"
+[[ "$(cat "$R/dots/.config/app/upd.conf")" == "v2" ]] && pass "checkout payload advanced with the branch" || fail "checkout payload advanced with the branch"
+grep -q "^Advanced checkout .* -> $S1_SHORT" /tmp/hand-core.out \
+  && pass "checkout advance is reported" || fail "checkout advance is reported"
+if grep -q "Handed off" /tmp/hand-core.out; then
+  fail "stripped runner cannot delegate"
+else
+  pass "stripped runner cannot delegate"
+fi
 grep -q "\"target\":\"$S1\"" "$SD/applies/"*/journal.jsonl \
   && pass "journal pins the discovered target" || fail "journal pins the discovered target"
 grep -q "\"path\":\".config/app/upd.conf\".*\"rev\":\"$S1\"" "$SD/manifest.jsonl" \
@@ -134,8 +144,13 @@ grep -q "\"path\":\".config/app/upd.conf\".*\"rev\":\"$S1\"" "$SD/manifest.jsonl
 
 echo "--- repeat update through the stale entrypoint ---"
 old_update "$H" > /tmp/hand-repeat.out 2>&1
-[[ $? == 0 ]] && grep -q "Already up to date" /tmp/hand-repeat.out \
-  && pass "repeat update is a clean noop" || fail "repeat update is a clean noop"
+[[ $? == 0 ]] && pass "repeat update exits 0" || fail "repeat update exits 0"
+# Steady now: checkout at target, tracking unmoved, launcher converged —
+# a single verdict line instead of another update narrative.
+[[ "$(grep -c '^Updating ' /tmp/hand-repeat.out)" == "0" ]] \
+  && pass "steady run skips the update narrative" || fail "steady run skips the update narrative"
+grep -q "^✓ Already up to date at $S1_SHORT" /tmp/hand-repeat.out \
+  && pass "steady verdict claims already-current" || fail "steady verdict claims already-current"
 [[ "$(find "$SD/applies" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ]] \
   && pass "noop opens no new transaction" || fail "noop opens no new transaction"
 
@@ -173,6 +188,11 @@ grep -q "1 commit(s) not on origin/main" /tmp/hand-div.out \
   && pass "remote tip deployed over divergence" || fail "remote tip deployed over divergence"
 [[ "$(git -C "$R" log --oneline | head -n 1)" == *"local-only tweak"* ]] \
   && pass "local commit untouched" || fail "local commit untouched"
+if grep -q "^Advanced checkout" /tmp/hand-div.out; then
+  fail "diverged checkout never advances"
+else
+  pass "diverged checkout never advances"
+fi
 grep -q "local comment" "$R/dots/.config/app/keep.conf" && [[ -f "$R/scratch.tmp" ]] \
   && pass "worktree dirt survives the fetch" || fail "worktree dirt survives the fetch"
 rm -f "$R/scratch.tmp"
@@ -198,6 +218,9 @@ grep -q "payload matches, nothing to deploy" /tmp/hand-skew.out \
   && pass "noop wording names the payload" || fail "noop wording names the payload"
 grep -q "tool revision differs" /tmp/hand-skew.out \
   && pass "noop names the updater skew" || fail "noop names the updater skew"
+# Became-current, not already-current: the checkout still lags the pin.
+grep -q "^✓ Up to date at " /tmp/hand-skew.out && ! grep -q "Already" /tmp/hand-skew.out \
+  && pass "skewed noop verdict avoids Already" || fail "skewed noop verdict avoids Already"
 git -C "$R" remote set-url origin "$U"
 
 echo "--- dry run hands off but deploys nothing ---"
@@ -226,6 +249,8 @@ new_update(){
 }
 new_update true "$H3" "$SD3" > /tmp/hand-dry.out 2>&1
 [[ $? == 0 ]] && pass "stale dry run exits 0" || fail "stale dry run exits 0"
+grep -q "^Handed off to updater " /tmp/hand-dry.out \
+  && pass "dry run delegates visibly" || fail "dry run delegates visibly"
 grep -q "(latest on origin/main)" /tmp/hand-dry.out \
   && pass "dry run shows discovered target" || fail "dry run shows discovered target"
 [[ "$(cat "$H3/.config/app/upd.conf")" == "v1" ]] \
@@ -247,6 +272,11 @@ new_update false "$H4" "$SD4" > /tmp/hand-ancient.out 2>&1
 [[ $? == 1 ]] && pass "ancient target fails safe" || fail "ancient target fails safe"
 grep -q -- "--at" /tmp/hand-ancient.out && pass "ancient failure suggests explicit target" || fail "ancient failure suggests explicit target"
 [[ ! -e "$SD4/applies" ]] && pass "ancient failure writes no transaction" || fail "ancient failure writes no transaction"
+if grep -q "^Handed off" /tmp/hand-ancient.out; then
+  fail "failed delegation claims nothing"
+else
+  pass "failed delegation claims nothing"
+fi
 
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" == 0 ]]

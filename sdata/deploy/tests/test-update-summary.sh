@@ -74,12 +74,15 @@ entry_adopt "$HA" "$C2" "$BASE"
 [[ $? == 0 ]] && pass "A adopt exits 0" || fail "A adopt exits 0"
 entry_update "$HA" "$C2" > /tmp/sum-a.out 2>&1
 [[ $? == 0 ]] && pass "A noop update exits 0" || fail "A noop update exits 0"
-grep -q "^Updating payload $BASE_SHORT" /tmp/sum-a.out \
-  && pass "A scopes the revision span to payload" || fail "A scopes the revision span to payload"
-grep -q "^Payload: 0 files to deploy (0 updates, 0 new, 0 deletions, 0 sidecars)" /tmp/sum-a.out \
-  && pass "A reports zero payload dimension" || fail "A reports zero payload dimension"
+# Genuinely current before invocation: concise verdict, no narrative.
+[[ "$(grep -c '^Updating ' /tmp/sum-a.out)" == "0" ]] \
+  && pass "A skips the update narrative" || fail "A skips the update narrative"
+[[ "$(grep -c '^Payload:' /tmp/sum-a.out)" == "0" ]] \
+  && pass "A prints no payload dimension" || fail "A prints no payload dimension"
 grep -q "^✓ Already up to date at " /tmp/sum-a.out \
   && pass "A verdict claims up-to-date" || fail "A verdict claims up-to-date"
+[[ "$(jq -r '.last_verified.target // empty' "$HA/.config/illogical-impulse/deployment-identity.json")" == "$BASE" ]] \
+  && pass "A records the verified target" || fail "A records the verified target"
 if grep -q "Handed off" /tmp/sum-a.out; then
   fail "A has no delegation to report"
 else
@@ -117,16 +120,16 @@ entry_update "$HB" "$C" > /tmp/sum-b.out 2>&1
 [[ $? == 0 ]] && pass "B handed-off noop exits 0" || fail "B handed-off noop exits 0: $(tail -n 3 /tmp/sum-b.out)"
 grep -q "Handed off to updater $TIP1_SHORT" /tmp/sum-b.out \
   && pass "B names the executing implementation" || fail "B names the executing implementation"
-grep -q "checkout at $BASE_SHORT stays untouched" /tmp/sum-b.out \
-  && pass "B names the untouched checkout" || fail "B names the untouched checkout"
+grep -q "checkout $BASE_SHORT evaluated as-is" /tmp/sum-b.out \
+  && pass "B names the unevaluated checkout" || fail "B names the unevaluated checkout"
 [[ "$(grep -c '^Updating ' /tmp/sum-b.out)" == "1" ]] \
   && pass "B prints one summary, not two" || fail "B prints one summary, not two"
 grep -q "^Payload: 0 files to deploy" /tmp/sum-b.out \
   && pass "B scopes its zero to payload" || fail "B scopes its zero to payload"
-grep -q "^✓ Already up to date at $TIP1_SHORT" /tmp/sum-b.out \
-  && pass "B verdict pins the evaluated target" || fail "B verdict pins the evaluated target"
+grep -q "^✓ Up to date at $TIP1_SHORT" /tmp/sum-b.out && ! grep -q "Already" /tmp/sum-b.out \
+  && pass "B verdict is became-current" || fail "B verdict is became-current"
 
-echo "--- C: fetch advances are reported once ---"
+echo "--- C: followed checkout needs no delegation ---"
 grep -q "fetched origin/main .* -> $TIP1_SHORT" /tmp/sum-b.out \
   && pass "C reports the tracking advance" || fail "C reports the tracking advance"
 entry_update "$HB" "$C" > /tmp/sum-c.out 2>&1
@@ -136,8 +139,13 @@ if grep -q "fetched origin/main" /tmp/sum-c.out; then
 else
   pass "C stays silent when nothing moved"
 fi
-grep -q "Handed off to updater $TIP1_SHORT" /tmp/sum-c.out \
-  && pass "C still delegates every run" || fail "C still delegates every run"
+if grep -q "Handed off" /tmp/sum-c.out; then
+  fail "C delegates nothing at target"
+else
+  pass "C delegates nothing at target"
+fi
+grep -q "^✓ Already up to date at $TIP1_SHORT" /tmp/sum-c.out \
+  && pass "C verdict is already-current" || fail "C verdict is already-current"
 
 echo "--- D: payload change counts, applies, and reports ---"
 printf 'v2\n' > "$R/dots/.config/app/upd.conf"
@@ -153,6 +161,64 @@ grep -q "^Payload: 1 files to deploy (1 updates, 0 new, 0 deletions, 0 sidecars)
   && pass "D deployed the payload" || fail "D deployed the payload"
 grep -q "^✓ Updated to $TIP2_SHORT" /tmp/sum-d.out \
   && pass "D verdict names the deployed target" || fail "D verdict names the deployed target"
+
+echo "--- E: immediate second invocation is steady ---"
+entry_update "$HB" "$C" > /tmp/sum-e.out 2>&1
+[[ $? == 0 ]] && pass "E second update exits 0" || fail "E second update exits 0"
+[[ "$(grep -c '^Updating ' /tmp/sum-e.out)" == "0" ]] \
+  && pass "E skips the update narrative" || fail "E skips the update narrative"
+grep -q "^✓ Already up to date at $TIP2_SHORT" /tmp/sum-e.out \
+  && pass "E verdict is already-current" || fail "E verdict is already-current"
+[[ "$(git -C "$C" rev-parse HEAD)" == "$(git -C "$C" rev-parse origin/main)" ]] \
+  && pass "E checkout follows the target" || fail "E checkout follows the target"
+
+echo "--- C2: stuck checkout delegates every run ---"
+git -C "$C" config user.email "fixture@example"
+git -C "$C" config user.name "fixture"
+printf 'local\n' > "$C/local-notes.txt"
+git -C "$C" add local-notes.txt
+git -C "$C" "${GCOMMIT[@]}" "local work" 2>/dev/null
+git -C "$R" -c user.email=fixture@example -c user.name=fixture -c commit.gpgsign=false \
+  commit -q --allow-empty -m "remote moves on" 2>/dev/null
+git -C "$R" push -q origin main 2>/dev/null
+TIP3_SHORT=$(git -C "$R" rev-parse --short HEAD)
+entry_update "$HB" "$C" > /tmp/sum-c2a.out 2>&1
+entry_update "$HB" "$C" > /tmp/sum-c2b.out 2>&1
+[[ $? == 0 ]] && pass "C2 stuck updates exit 0" || fail "C2 stuck updates exit 0"
+grep -q "^Handed off to updater $TIP3_SHORT" /tmp/sum-c2a.out && grep -q "^Handed off to updater $TIP3_SHORT" /tmp/sum-c2b.out \
+  && pass "C2 delegates on every run" || fail "C2 delegates on every run"
+grep -q "^✓ Up to date at $TIP3_SHORT" /tmp/sum-c2a.out && ! grep -q "Already" /tmp/sum-c2a.out \
+  && pass "C2 never claims already-current" || fail "C2 never claims already-current"
+if grep -q "^Advanced checkout" /tmp/sum-c2a.out /tmp/sum-c2b.out; then
+  fail "C2 diverged checkout never advances"
+else
+  pass "C2 diverged checkout never advances"
+fi
+[[ "$(git -C "$C" log --oneline | head -n 1)" == *"local work"* ]] \
+  && pass "C2 local commit untouched" || fail "C2 local commit untouched"
+
+echo "--- F: detached checkout degrades to local, advances nothing ---"
+CF="$T/detached"
+git clone -q "$U" "$CF" 2>/dev/null
+git -C "$CF" checkout -q --detach HEAD 2>/dev/null
+DETACHED=$(git -C "$CF" rev-parse HEAD)
+rm -rf "$T/hf" && cp -r "$H0" "$T/hf" && HF="$T/hf"
+printf 'v2\n' > "$HF/.config/app/upd.conf"
+entry_adopt "$HF" "$CF" "$DETACHED"
+entry_update "$HF" "$CF" > /tmp/sum-f.out 2>&1
+[[ $? == 0 ]] && pass "F detached update exits 0" || fail "F detached update exits 0"
+grep -q "no remote tracking branch configured" /tmp/sum-f.out \
+  && pass "F says it runs local-only" || fail "F says it runs local-only"
+if grep -q "Handed off\|Advanced checkout\|fetched " /tmp/sum-f.out; then
+  fail "F touches no remote state"
+else
+  pass "F touches no remote state"
+fi
+[[ "$(git -C "$CF" rev-parse HEAD)" == "$DETACHED" ]] \
+  && pass "F detached HEAD unmoved" || fail "F detached HEAD unmoved"
+grep -q "^✓ Already up to date at " /tmp/sum-f.out && [[ "$(grep -c '^Updating ' /tmp/sum-f.out)" == "0" ]] \
+  && pass "F steady verdict is a single line" || fail "F steady verdict is a single line"
+
 if grep -q "will change" /tmp/sum-d.out /tmp/sum-b.out /tmp/sum-a.out; then
   fail "no shape uses the old conflated wording"
 else
