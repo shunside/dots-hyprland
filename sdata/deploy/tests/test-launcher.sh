@@ -27,6 +27,9 @@ trap '[[ -n "${KEEP:-}" ]] || rm -rf "$T"' EXIT
 
 export REPO_ROOT="$SRC"
 export XDG_BIN_HOME="$T/bin"
+# Contain the managed fish PATH drop-in too: install() writes it under
+# XDG_CONFIG_HOME, which would otherwise be the real home here.
+export XDG_CONFIG_HOME="$T/xdg"
 export PATH="$T/bin:$PATH"
 
 echo "--- install/remove semantics ---"
@@ -48,6 +51,19 @@ setup_launcher_install > /tmp/lc-foreign.out 2>&1
 [[ $? == 0 ]] && [[ ! -L "$T/bin/impulse" ]] && grep -q "leaving it alone" /tmp/lc-foreign.out \
   && pass "foreign occupant left alone" || fail "foreign occupant left alone"
 rm -f "$T/bin/impulse"
+setup_launcher_install > /tmp/lc-path.out 2>&1
+[[ $? == 0 ]] && pass "install exits 0" || fail "install exits 0"
+[[ -f "$T/xdg/fish/conf.d/impulse-path.fish" ]] \
+  && pass "install persists fish PATH drop-in" || fail "install persists fish PATH drop-in"
+[[ "$(head -n 1 "$T/xdg/fish/conf.d/impulse-path.fish")" == "# impulse-path (managed by illogical-impulse setup)" ]] \
+  && pass "drop-in carries the ownership marker" || fail "drop-in carries the ownership marker"
+grep -qF "set -gx PATH \"$T/bin\" \$PATH" "$T/xdg/fish/conf.d/impulse-path.fish" \
+  && pass "drop-in prepends the launcher dir" || fail "drop-in prepends the launcher dir"
+printf '# user content\n' > "$T/xdg/fish/conf.d/impulse-path.fish"
+setup_launcher_install > /tmp/lc-pathforeign.out 2>&1
+[[ $? == 0 ]] && [[ "$(cat "$T/xdg/fish/conf.d/impulse-path.fish")" == "# user content" ]] \
+  && pass "foreign drop-in left alone" || fail "foreign drop-in left alone"
+rm -f "$T/xdg/fish/conf.d/impulse-path.fish"
 setup_launcher_remove > /dev/null 2>&1
 [[ $? == 0 ]] && pass "remove with no link exits 0" || fail "remove with no link exits 0"
 ln -s "$SRC/setup" "$T/bin/impulse"
@@ -103,7 +119,10 @@ git -C "$LR" init -qb main
 git -C "$LR" config user.email "fixture@example"
 git -C "$LR" config user.name "fixture"
 git -C "$LR" config commit.gpgsign false
-mkdir -p "$LR/dots/.config/app" "$LR/sdata/deploy"
+# NOTE: copy before any mkdir of $LR/sdata, or cp -r nests sdata/sdata.
+cp -r "$SRC/sdata" "$LR/sdata"
+cp "$SRC/setup" "$LR/setup"
+mkdir -p "$LR/dots/.config/app"
 printf 'managed dots/.config/app .config/app\n' > "$LR/sdata/deploy/ownership.conf"
 printf 'v1\n' > "$LR/dots/.config/app/upd.conf"
 git -C "$LR" add -A
@@ -143,7 +162,7 @@ adopt_own
 [[ -L "$OH/.local/bin/impulse" ]] && pass "adopt delivers launcher" || fail "adopt delivers launcher"
 [[ "$(readlink -f "$OH/.local/bin/impulse")" == "$(readlink -f "$LR/setup")" ]] \
   && pass "launcher points at adopted repo" || fail "launcher points at adopted repo"
-grep -q "now works from any directory" /tmp/lc-adopt-own.out \
+grep -q "new shells pick it up automatically" /tmp/lc-adopt-own.out \
   && pass "adopt announces the launcher once" || fail "adopt announces the launcher once"
 rm -f "$OH/.local/bin/impulse"
 printf 'v2\n' > "$LR/dots/.config/app/upd.conf"
@@ -172,6 +191,104 @@ mkdir -p "$T/foreign2"
 )
 [[ $? == 0 ]] && pass "foreign adopt exits 0" || fail "foreign adopt exits 0"
 [[ ! -e "$T/fakebin2" ]] && pass "foreign adopt leaves bin alone" || fail "foreign adopt leaves bin alone"
+
+echo "--- persistent PATH and new-shell resolution ---"
+# Field model: ~/.local/bin exists but is absent from PATH, no launcher,
+# fish is the shell. Everything resolves inside the fixture home.
+PH="$T/pathhome"
+mkdir -p "$PH/.config/app" "$PH/.config/illogical-impulse" "$PH/.local/bin"
+printf 'v2\n' > "$PH/.config/app/upd.conf"
+printf '#!/bin/sh\necho unrelated\n' > "$PH/.local/bin/other-tool"
+chmod +x "$PH/.local/bin/other-tool"
+REV_PH=$(git -C "$LR" rev-parse HEAD)
+adopt_home(){
+  (
+    export HOME="$PH" XDG_CONFIG_HOME="$PH/.config" XDG_DATA_HOME="$PH/.local/share" XDG_BIN_HOME="$PH/.local/bin"
+    export REPO_ROOT="$LR" DEPLOY_LIB_DIR="$LIBDIR"
+    unset FONTSET_DIR_NAME INSTALL_VIA_NIX
+    DEPLOY_AT="$REV_PH" DEPLOY_HOME_DIR="$PH" DEPLOY_STATE_DIR=""
+    DEPLOY_WANT_APPLY=true DEPLOY_WANT_STATUS=false DEPLOY_WANT_DRYRUN=false DEPLOY_WANT_RECONCILE=false
+    # shellcheck disable=SC1091
+    source "${HERE}/../../subcmd-adopt/0.run.sh" > /tmp/lc-adopt-ph.out 2>&1
+  )
+}
+FISHBIN="$(command -v fish || true)"
+# A brand-new session: scrubbed environment, fixture bin NOT on PATH.
+new_fish(){
+  env -i HOME="$PH" PATH="/usr/bin:/bin" "$FISHBIN" -c "$1"
+}
+adopt_home
+[[ $? == 0 ]] && pass "path-model adopt exits 0" || fail "path-model adopt exits 0"
+[[ -L "$PH/.local/bin/impulse" ]] && pass "lifecycle creates the launcher" || fail "lifecycle creates the launcher"
+[[ -f "$PH/.config/fish/conf.d/impulse-path.fish" ]] \
+  && pass "lifecycle persists the PATH drop-in" || fail "lifecycle persists the PATH drop-in"
+# The reported presentation bug: styles set (tty) but printed literally.
+# Force styled output and prove the note renders real escapes, not text.
+(
+  export HOME="$T/shome" XDG_CONFIG_HOME="$T/shome/.config" XDG_BIN_HOME="$T/shome/.local/bin"
+  export REPO_ROOT="$SRC" DEPLOY_HOME="$T/shome" DEPLOY_SELF_HOME="$T/shome"
+  mkdir -p "$T/shome"
+  STY_FAINT='\e[2m' STY_RST='\e[00m' setup_launcher_ensure > /tmp/lc-styled.out 2>&1
+)
+grep -q "new shells pick it up automatically" /tmp/lc-styled.out \
+  && pass "styled note announces" || fail "styled note announces"
+if grep -qF '\e' /tmp/lc-styled.out; then
+  fail "styled note has no literal escapes"
+else
+  pass "styled note has no literal escapes"
+fi
+[[ -x "$PH/.local/bin/other-tool" && "$(cat "$PH/.local/bin/other-tool")" == "$(printf '#!/bin/sh\necho unrelated')" ]] \
+  && pass "unrelated bin entry untouched" || fail "unrelated bin entry untouched"
+if [[ -z "$FISHBIN" ]]; then
+  echo "SKIP: fish unavailable for new-session checks"
+else
+  [[ "$(new_fish 'command -v impulse')" == "$PH/.local/bin/impulse" ]] \
+    && pass "new fish session resolves impulse" || fail "new fish session resolves impulse: $(new_fish 'command -v impulse' 2>&1)"
+  (cd /tmp && new_fish 'impulse commands' > /tmp/lc-fish-out.txt 2>&1)
+  [[ $? == 0 ]] && grep -q "impulse update" /tmp/lc-fish-out.txt \
+    && pass "impulse works outside the repo in a new shell" || fail "impulse works outside the repo in a new shell"
+fi
+SNIP_SUM="$(sha256sum "$PH/.config/fish/conf.d/impulse-path.fish" | awk '{print $1}')"
+(
+  export HOME="$PH" XDG_CONFIG_HOME="$PH/.config" XDG_DATA_HOME="$PH/.local/share" XDG_BIN_HOME="$PH/.local/bin"
+  export REPO_ROOT="$LR" DEPLOY_HOME="$PH" DEPLOY_SELF_HOME="$PH"
+  out="$(setup_launcher_ensure 2>&1)"; rc=$?
+  [[ $rc == 0 && -z "$out" ]] && pass "repeat ensure is silent" || { fail "repeat ensure is silent"; echo "$out"; }
+)
+[[ "$(sha256sum "$PH/.config/fish/conf.d/impulse-path.fish" | awk '{print $1}')" == "$SNIP_SUM" ]] \
+  && pass "repeat ensure leaves the drop-in identical" || fail "repeat ensure leaves the drop-in identical"
+# Dry runs change nothing at all, including the launcher lifecycle.
+rm -f "$PH/.local/bin/impulse" "$PH/.config/fish/conf.d/impulse-path.fish"
+(
+  export HOME="$PH" XDG_CONFIG_HOME="$PH/.config" XDG_DATA_HOME="$PH/.local/share" XDG_BIN_HOME="$PH/.local/bin"
+  export REPO_ROOT="$LR" DEPLOY_LIB_DIR="$LIBDIR"
+  unset FONTSET_DIR_NAME INSTALL_VIA_NIX
+  DEPLOY_AT="HEAD" DEPLOY_HOME_DIR="$PH" DEPLOY_STATE_DIR=""
+  DEPLOY_APPLY_FONTSET=""; DEPLOY_APPLY_FONTSET_SET=false; DEPLOY_APPLY_VIANIX_SET=false
+  DEPLOY_UPDATE_DRYRUN=true DEPLOY_UPDATE_VERBOSE=false
+  declare -a APPLY_RESOLVE=()
+  # shellcheck disable=SC1091
+  source "${HERE}/../../subcmd-update/0.run.sh" > /tmp/lc-dry-ph.out 2>&1
+)
+[[ $? == 0 ]] && pass "dry-run noop exits 0" || fail "dry-run noop exits 0"
+[[ ! -e "$PH/.local/bin/impulse" && ! -e "$PH/.config/fish/conf.d/impulse-path.fish" ]] \
+  && pass "dry run installs nothing" || fail "dry run installs nothing"
+# Uninstall removes exactly what the project owns: recreate both owned
+# files first (the dry run above must not have), then remove.
+(
+  export HOME="$PH" XDG_CONFIG_HOME="$PH/.config" XDG_DATA_HOME="$PH/.local/share" XDG_BIN_HOME="$PH/.local/bin"
+  export REPO_ROOT="$LR" DEPLOY_HOME="$PH" DEPLOY_SELF_HOME="$PH"
+  setup_launcher_ensure > /dev/null 2>&1
+)
+printf '# user content\n' > "$PH/.config/fish/conf.d/user-path.fish"
+(
+  export HOME="$PH" XDG_CONFIG_HOME="$PH/.config" XDG_BIN_HOME="$PH/.local/bin" REPO_ROOT="$LR"
+  setup_launcher_remove > /tmp/lc-remove-ph.out 2>&1
+)
+[[ $? == 0 && ! -e "$PH/.local/bin/impulse" && ! -e "$PH/.config/fish/conf.d/impulse-path.fish" ]] \
+  && pass "uninstall removes owned launcher and drop-in" || fail "uninstall removes owned launcher and drop-in"
+[[ -x "$PH/.local/bin/other-tool" && -f "$PH/.config/fish/conf.d/user-path.fish" ]] \
+  && pass "uninstall keeps foreign files" || fail "uninstall keeps foreign files"
 
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" == 0 ]]

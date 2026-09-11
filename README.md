@@ -154,6 +154,16 @@ From inside the repo checkout, `./setup` works the same
 `adopt` or `update` also installs the `impulse` launcher itself, so
 later runs work from anywhere.
 
+The launcher is two parts: a symlink in `~/.local/bin` and a managed
+fish drop-in (`~/.config/fish/conf.d/impulse-path.fish`) keeping that
+directory on `PATH`. Every new fish shell — login or not — picks it up
+with no reload or restart; the shell you ran the install from needs a
+fresh session (a child process cannot change its parent's `PATH`).
+Uninstall removes both, but only when they are project-owned: anything
+else at those paths is left alone with a warning. Bash/zsh users add
+`~/.local/bin` to `PATH` once themselves
+(`export PATH="$HOME/.local/bin:$PATH"`).
+
 `update` only touches fork-managed files. User- and runtime-owned state
 is left alone, and anything locally different that needs a human call
 stops and asks instead of being overwritten quietly.
@@ -168,12 +178,12 @@ Checkouts that predate the self-update handoff cannot bootstrap
 themselves: their updater fetches the latest revision but has no code to
 run it with, so `update` may report "Already up to date" while the
 `impulse` launcher is still missing. That wording describes the payload,
-not the updater itself. If that is your machine, run once from anywhere:
+not the updater itself. If that is your machine, run once from anywhere (same in Bash and Fish):
 
 ```sh
-git -C ~/Projects/dots-hyprland fetch origin main &&
-  bash <(git -C ~/Projects/dots-hyprland show FETCH_HEAD:sdata/lib/update-bridge.sh) \
-    --repo ~/Projects/dots-hyprland
+git -C ~/Projects/dots-hyprland fetch origin main
+git -C ~/Projects/dots-hyprland show FETCH_HEAD:sdata/lib/update-bridge.sh > /tmp/ii-bridge.sh
+bash /tmp/ii-bridge.sh --repo ~/Projects/dots-hyprland
 ```
 
 The bridge fetches (remote-tracking refs only, like `update`), then tries

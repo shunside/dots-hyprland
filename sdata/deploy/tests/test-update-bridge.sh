@@ -136,6 +136,8 @@ git -C "$C" fetch -q origin main 2>/dev/null
   && pass "bridge fast-forwarded the checkout" || fail "bridge fast-forwarded the checkout"
 [[ -L "$H1/.local/bin/impulse" && "$(readlink -f "$H1/.local/bin/impulse")" == "$C/setup" ]] \
   && pass "bridge created the launcher" || fail "bridge created the launcher"
+[[ -f "$H1/.config/fish/conf.d/impulse-path.fish" ]] \
+  && pass "bridge persisted the fish PATH drop-in" || fail "bridge persisted the fish PATH drop-in"
 [[ "$(cat "$C/scratch.txt")" == "scratch" ]] \
   && pass "untracked worktree file survives" || fail "untracked worktree file survives"
 [[ "$(git -C "$C" status --porcelain)" == "?? scratch.txt" ]] \
@@ -185,6 +187,8 @@ git -C "$C2" fetch -q origin main 2>/dev/null
   && pass "target payload deployed over divergence" || fail "target payload deployed over divergence"
 [[ -L "$H2/.local/bin/impulse" ]] \
   && pass "diverged bridge created the launcher" || fail "diverged bridge created the launcher"
+[[ -f "$H2/.config/fish/conf.d/impulse-path.fish" ]] \
+  && pass "diverged bridge persisted the PATH drop-in" || fail "diverged bridge persisted the PATH drop-in"
 grep -q "leaving branch" /tmp/br-s3.out \
   && pass "bridge says the branch was left alone" || fail "bridge says the branch was left alone"
 

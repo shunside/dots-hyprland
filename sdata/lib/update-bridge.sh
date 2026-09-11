@@ -8,9 +8,10 @@
 # execute here.
 #
 # Supported invocation (the fetched ref supplies this script, so the
-# checkout's age does not matter):
-#   git -C <repo> fetch origin main &&
-#   bash <(git -C <repo> show FETCH_HEAD:sdata/lib/update-bridge.sh) --repo <repo>
+# checkout's age does not matter; same in Bash and Fish):
+#   git -C <repo> fetch origin main
+#   git -C <repo> show FETCH_HEAD:sdata/lib/update-bridge.sh > /tmp/ii-bridge.sh
+#   bash /tmp/ii-bridge.sh --repo <repo>
 #
 # What it does, in order:
 #   1. Resolves the checkout's tracking remote/branch (origin/main fallback)

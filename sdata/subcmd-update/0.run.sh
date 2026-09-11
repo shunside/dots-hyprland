@@ -445,7 +445,14 @@ fi
 echo "${UPDATE_N_WRITE} files will change: ${UPDATE_N_UPD} updates, ${UPDATE_N_INS} new, ${UPDATE_N_DEL} deletions, ${UPDATE_N_SIDE} sidecars${UPDATE_KEEP_TXT}"
 
 if (( UPDATE_N_WRITE == 0 )); then
-  setup_launcher_ensure
+  # Dry runs change nothing at all, including the launcher lifecycle.
+  # The `:` keeps this branch non-empty for tooling that strips the
+  # ensure call to model pre-launcher runners (an if with no commands
+  # is a bash syntax error, comments included).
+  if [[ "${DEPLOY_UPDATE_DRYRUN:-false}" != true ]]; then
+    : "real run"
+    setup_launcher_ensure
+  fi
   echo -e "${STY_GREEN}✓${STY_RST} Already up to date at ${UPDATE_TARGET_SHORT} — payload matches, nothing to deploy"
   # Deployment state and tool revision are distinct: the payload can be
   # current while the checkout's own updater lags the deployed target
