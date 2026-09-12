@@ -168,7 +168,9 @@ validate against) — manually prepend `~/.local/bin` to its `PATH` once.
 
 `update` only touches fork-managed files. User- and runtime-owned state
 is left alone, and anything locally different that needs a human call
-stops and asks instead of being overwritten quietly.
+stops and asks instead of being overwritten quietly. A machine already at
+the target answers steady-state runs immediately; anything changed since
+the last verified run takes the full evaluation path again.
 
 > [!NOTE]
 > `impulse update` checks your branch's tracking remote for the latest

@@ -123,7 +123,7 @@ update_show_tech_log(){
 update_record_verified(){
   [[ -n "${APPLY_TARGET:-}" ]] || return 0
   local ident tmp now
-  ident="$APPLY_SD/$DEPLOY_IDENTITY_NAME"
+  ident="$APPLY_SD/${DEPLOY_IDENTITY_NAME:-deployment-identity.json}"
   [[ -f "$ident" ]] || return 0
   now="$(date -u +%FT%TZ 2>/dev/null || date 2>/dev/null || true)"
   tmp="$(mktemp "${TMPDIR:-/tmp}/setup-verified-XXXXXX.json" 2>/dev/null)" || return 0
@@ -133,6 +133,164 @@ update_record_verified(){
   else
     rm -f "$tmp" || true
   fi
+  return 0
+}
+
+# Canonical live-state snapshot for steady-state invalidation: one stat
+# line per managed live path, per ancestor dir below $HOME (presence,
+# type, size, mtime, mode), plus full contents of submodule live trees
+# (whose drift no mtime on the top dir alone would reveal). Byte-compared,
+# never parsed, so odd filenames are safe. Both sides generate
+# identically — any live delta flips the comparison and forces full
+# evaluation. Ancestor dirs catch entry add/remove inside managed dirs.
+update_live_snapshot(){
+  local mf="$1" home="$2" out="$3" tmp paths
+  tmp="$(mktemp "${TMPDIR:-/tmp}/setup-snap-XXXXXX.list" 2>/dev/null)" || return 1
+  paths="$(jq -r '.path // empty' "$mf" 2>/dev/null || true)"
+  [[ -n "$paths" ]] || { rm -f "$tmp"; return 1; }
+  local p d subpaths
+  {
+    printf '%s\n' "$paths"
+    while IFS= read -r p; do
+      [[ -z "$p" ]] && continue
+      d="$p"
+      while [[ "$d" == */* ]]; do
+        d="${d%/*}"
+        printf '%s\n' "$d"
+      done
+    done <<<"$paths"
+  } | LC_ALL=C sort -u > "$tmp" || { rm -f "$tmp"; return 1; }
+  subpaths="$(jq -r -s '.[] | select(.kind=="submodule") | .path // empty' "$mf" 2>/dev/null || true)"
+  # shellcheck disable=SC2046
+  ( cd "$home" 2>/dev/null || exit 1
+    xargs -d '\n' -r stat -c '%n|%F|%s|%y|%a' -- 2>/dev/null || true
+    if [[ -n "$subpaths" ]]; then
+      # Relative roots keep %n portable; NUL-safe against hostile names.
+      printf '%s\n' "$subpaths" | tr '\n' '\0' | xargs -0 -r find -mindepth 1 -print0 2>/dev/null \
+        | xargs -0 -r stat -c '%n|%F|%s|%y|%a' -- 2>/dev/null || true
+    fi
+  ) < "$tmp" | LC_ALL=C sort -u > "$out" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  rm -f "$tmp"
+  return 0
+}
+
+# Steady-state fingerprint: everything a cheap re-check needs to prove
+# the machine still matches a verified target. Written alongside the
+# verification checkpoint on success paths only (never dry runs).
+update_record_fingerprint(){
+  [[ -n "${APPLY_TARGET:-}" ]] || return 1
+  local mf dec fp snap tmp now msha dsha lsha subjson
+  mf="$APPLY_SD/${DEPLOY_MANIFEST_NAME:-manifest.jsonl}"
+  [[ -f "$mf" ]] || return 1
+  fp="$APPLY_SD/steady-fingerprint.json"
+  snap="$APPLY_SD/steady-live.txt"
+  now="$(date -u +%FT%TZ 2>/dev/null || date 2>/dev/null || true)"
+  tmp="$(mktemp "${TMPDIR:-/tmp}/setup-steady-XXXXXX" 2>/dev/null)" || return 1
+  update_live_snapshot "$mf" "$DEPLOY_HOME" "$tmp.snap" 2>/dev/null || { rm -f "$tmp" "$tmp.snap"; return 1; }
+  mv -f "$tmp.snap" "$snap" 2>/dev/null || { rm -f "$tmp" "$tmp.snap"; return 1; }
+  msha="$(sha256sum "$mf" 2>/dev/null | awk '{print $1}' || true)"
+  [[ -n "$msha" ]] || { rm -f "$tmp"; return 1; }
+  dec="$APPLY_SD/${DEPLOY_DECISIONS_NAME:-decisions.jsonl}"
+  if [[ -f "$dec" ]]; then
+    dsha="$(sha256sum "$dec" 2>/dev/null | awk '{print $1}' || true)"
+  else
+    dsha="none"
+  fi
+  lsha="$(sha256sum "$snap" 2>/dev/null | awk '{print $1}' || true)"
+  subjson="{}"
+  local spath sdir shead sstatus sentry shead_out sstat_out
+  while IFS= read -r spath; do
+    [[ -z "$spath" ]] && continue
+    sdir="$DEPLOY_HOME/$spath"
+    shead="missing"; sstatus="missing"
+    if shead_out="$(git -C "$sdir" rev-parse HEAD 2>/dev/null)"; then shead="$shead_out"; fi
+    if sstat_out="$(git -C "$sdir" status --porcelain=v1 2>/dev/null)"; then
+      sstatus="$(printf '%s' "$sstat_out" | sha256sum 2>/dev/null | awk '{print $1}' || true)"
+      [[ -n "$sstatus" ]] || sstatus="missing"
+    fi
+    sentry="$(printf '%s|%s' "$shead" "$sstatus")"
+    subjson="$(jq --arg k "$spath" --arg v "$sentry" '. + {($k): $v}' <<<"$subjson" 2>/dev/null || printf '%s' "$subjson")"
+  done < <(jq -r -s '.[] | select(.kind=="submodule") | .path // empty' "$mf" 2>/dev/null || true)
+  if jq -n --arg t "$APPLY_TARGET" --arg ts "$now" --arg m "$msha" --arg d "$dsha" \
+       --arg l "$lsha" --arg fs "${DEPLOY_APPLY_FONTSET_SET:-false}" --arg fv "${DEPLOY_APPLY_FONTSET:-}" \
+       --arg vx "${DEPLOY_APPLY_VIANIX_SET:-false}" --argjson sub "$subjson" \
+       '{target:$t, at:$ts, manifest:$m, decisions:$d, live:$l, fontset_set:$fs, fontset:$fv, vianix:$vx, sub:$sub}' \
+       > "$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$fp" 2>/dev/null || rm -f "$tmp" || true
+  else
+    rm -f "$tmp" || true
+    return 1
+  fi
+  return 0
+}
+
+# Cheap steady-state proof (pure reads, no writes): every signal that a
+# full evaluation could change is re-checked directly. Any doubt at all
+# returns nonzero and the caller runs the full correct path. In
+# particular: target moved, checkout moved or dirty under sdata/setup,
+# live drift, manifest/decisions/identity replaced, inputs differ,
+# submodule moved/dirtied, launcher presence broken, or no fingerprint
+# from a previous success. Locks and adoption state are owned by the gates
+# above, which always run first.
+update_fast_current(){
+  [[ "${DEPLOY_UPDATE_AT_GIVEN:-false}" == true ]] && return 1
+  [[ "${DEPLOY_UPDATE_VERBOSE:-false}" == true ]] && return 1
+  [[ "${DEPLOY_UPDATE_DRYRUN:-false}" == true ]] && return 1
+  if declare -p APPLY_RESOLVE >/dev/null 2>&1; then
+    (( ${#APPLY_RESOLVE[@]} > 0 )) && return 1
+  fi
+  local fp snap ident mf
+  fp="$APPLY_SD/steady-fingerprint.json"; snap="$APPLY_SD/steady-live.txt"
+  ident="$APPLY_SD/${DEPLOY_IDENTITY_NAME:-deployment-identity.json}"; mf="$APPLY_SD/${DEPLOY_MANIFEST_NAME:-manifest.jsonl}"
+  [[ -f "$fp" && -f "$snap" && -f "$ident" && -f "$mf" ]] || return 1
+  local target r_target r_manifest r_decisions cur_manifest cur_decisions
+  target="$(git -C "$REPO_ROOT" rev-parse --verify "${DEPLOY_AT}^{commit}" 2>/dev/null || true)"
+  [[ "$target" =~ ^[0-9a-f]{40}$ ]] || return 1
+  r_target="$(jq -r '.target // empty' "$fp" 2>/dev/null || true)"
+  [[ -n "$r_target" && "$r_target" == "$target" ]] || return 1
+  [[ "$(jq -r '.last_verified.target // empty' "$ident" 2>/dev/null || true)" == "$target" ]] || return 1
+  [[ "$(git -C "$REPO_ROOT" rev-parse --verify HEAD^{commit} 2>/dev/null || true)" == "$target" ]] || return 1
+  git -C "$REPO_ROOT" diff --quiet HEAD -- sdata setup 2>/dev/null || return 1
+  git -C "$REPO_ROOT" diff --quiet --cached -- sdata setup 2>/dev/null || return 1
+  cur_manifest="$(sha256sum "$mf" 2>/dev/null | awk '{print $1}' || true)"
+  r_manifest="$(jq -r '.manifest // empty' "$fp" 2>/dev/null || true)"
+  [[ -n "$cur_manifest" && -n "$r_manifest" && "$cur_manifest" == "$r_manifest" ]] || return 1
+  local dec="$APPLY_SD/${DEPLOY_DECISIONS_NAME:-decisions.jsonl}"
+  if [[ -f "$dec" ]]; then
+    cur_decisions="$(sha256sum "$dec" 2>/dev/null | awk '{print $1}' || true)"
+  else
+    cur_decisions="none"
+  fi
+  r_decisions="$(jq -r '.decisions // empty' "$fp" 2>/dev/null || true)"
+  [[ -n "$r_decisions" && "$cur_decisions" == "$r_decisions" ]] || return 1
+  [[ "$(jq -r '.fontset_set // empty' "$fp" 2>/dev/null || true)" == "${DEPLOY_APPLY_FONTSET_SET:-false}" ]] || return 1
+  [[ "$(jq -r '.fontset // empty' "$fp" 2>/dev/null || true)" == "${DEPLOY_APPLY_FONTSET:-}" ]] || return 1
+  [[ "$(jq -r '.vianix // empty' "$fp" 2>/dev/null || true)" == "${DEPLOY_APPLY_VIANIX_SET:-false}" ]] || return 1
+  local tmp spath sdir shead sstatus sentry want shead_out sstat_out
+  tmp="$(mktemp "${TMPDIR:-/tmp}/setup-steady-XXXXXX" 2>/dev/null)" || return 1
+  update_live_snapshot "$mf" "$DEPLOY_HOME" "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  cmp -s "$tmp" "$snap" || { rm -f "$tmp"; return 1; }
+  rm -f "$tmp"
+  while IFS= read -r spath; do
+    [[ -z "$spath" ]] && continue
+    sdir="$DEPLOY_HOME/$spath"
+    shead="missing"; sstatus="missing"
+    if shead_out="$(git -C "$sdir" rev-parse HEAD 2>/dev/null)"; then shead="$shead_out"; fi
+    if sstat_out="$(git -C "$sdir" status --porcelain=v1 2>/dev/null)"; then
+      sstatus="$(printf '%s' "$sstat_out" | sha256sum 2>/dev/null | awk '{print $1}' || true)"
+      [[ -n "$sstatus" ]] || sstatus="missing"
+    fi
+    sentry="$(printf '%s|%s' "$shead" "$sstatus")"
+    want="$(jq -r --arg k "$spath" '.sub[$k] // empty' "$fp" 2>/dev/null || true)"
+    [[ -n "$want" && "$want" == "$sentry" ]] || return 1
+  done < <(jq -r -s '.[] | select(.kind=="submodule") | .path // empty' "$mf" 2>/dev/null || true)
+  local link wantlink cur
+  link="${XDG_BIN_HOME:-$HOME/.local/bin}/${SETUP_GLOBAL_CMD:-impulse}"
+  wantlink="$(readlink -f "$REPO_ROOT/setup" 2>/dev/null || printf '%s' "$REPO_ROOT/setup")"
+  cur=""
+  if [[ -L "$link" ]]; then cur="$(readlink -f "$link" 2>/dev/null || true)"; fi
+  [[ -n "$cur" && "$cur" == "$wantlink" ]] || return 1
+  setup_shells_present 2>/dev/null || return 1
   return 0
 }
 
@@ -178,6 +336,33 @@ update_scope_head(){
       echo -e "${STY_FAINT}note: local branch holds $UPDATE_AHEAD commit(s) not on $UPDATE_DISCOVERED_FROM; deploying the remote tip, local work untouched.${STY_RST}"
     fi
   fi
+}
+
+# What the fork revision window crossed (base..target), grouped by top
+# level: answers "what changed" for everything the revision carries, while
+# the Payload line below answers what lands on disk. Silent when empty or
+# unresolvable. Local objects only, no network.
+update_repo_summary(){
+  local base="$1" target="$2" numstat total groups shown rest restfiles shead
+  [[ -n "$base" && -n "$target" && "$base" != "$target" ]] || return 0
+  numstat="$(git -C "$REPO_ROOT" diff --numstat --no-renames "$base" "$target" -- 2>/dev/null || true)"
+  [[ -n "$numstat" ]] || return 0
+  total="$(printf '%s\n' "$numstat" | grep -c . || true)"
+  [[ "$total" =~ ^[0-9]+$ ]] && (( total > 0 )) || return 0
+  groups="$(printf '%s\n' "$numstat" | awk -F'\t' '{p=$3; if (p == "") next; i=index(p,"/"); k=(i ? substr(p,1,i-1) : p); c[k]++} END {for (k in c) printf "%s %d\n", k, c[k]}' | LC_ALL=C sort -k2,2nr -k1,1 || true)"
+  [[ -n "$groups" ]] || return 0
+  shown="$(printf '%s\n' "$groups" | head -n 3 | awk '{printf "%s%s %s", (NR>1 ? ", " : ""), $1, $2}')"
+  rest="$(printf '%s\n' "$groups" | tail -n +4 | awk '{s+=$2} END {print s+0}')"
+  if [[ "$rest" =~ ^[0-9]+$ ]] && (( rest > 0 )); then
+    shown="$shown, +$rest more files"
+  fi
+  shead="$(git -C "$REPO_ROOT" rev-parse --short "$base" 2>/dev/null || printf '%s' "${base:0:7}")"
+  if (( total == 1 )); then
+    echo "Repository: 1 file changed since ${shead} (${shown})"
+  else
+    echo "Repository: ${total} files changed since ${shead} (${shown})"
+  fi
+  return 0
 }
 
 # --- Read-only state gates (no writes, not even the lock). ---
@@ -320,6 +505,17 @@ if [[ "${DEPLOY_UPDATE_AT_GIVEN:-false}" != true ]]; then
 fi
 
 term_spin_stop || true
+
+# Steady shortcut: a previous success recorded everything a re-check
+# needs, and every signal still agrees — target, checkout, live files,
+# manifests, inputs, submodules, launcher presence, running code. Pure
+# reads; any doubt falls through to the full correct path below. The
+# suffix marks the cheap proof so instant answers stay trustworthy.
+if update_fast_current 2>/dev/null; then
+  UPDATE_FAST_SHORT=$(git -C "$REPO_ROOT" rev-parse --short "${DEPLOY_AT}" 2>/dev/null || printf '%s' "${DEPLOY_AT:0:7}")
+  echo -e "${STY_GREEN}✓${STY_RST} Already up to date at ${UPDATE_FAST_SHORT} — payload matches, nothing to deploy (quick check)"
+  exit 0
+fi
 
 # --- Self-update handoff: run the target revision's updater, not ours.
 # A checkout older than the target would otherwise execute stale
@@ -532,6 +728,9 @@ if (( UPDATE_N_KEEP > 0 )); then
   UPDATE_KEEP_TXT=" · ${UPDATE_N_KEEP} kept as-is by your decisions"
 fi
 UPDATE_PAYLOAD_LINE="Payload: ${UPDATE_N_WRITE} files to deploy (${UPDATE_N_UPD} updates, ${UPDATE_N_INS} new, ${UPDATE_N_DEL} deletions, ${UPDATE_N_SIDE} sidecars)${UPDATE_KEEP_TXT}"
+if (( UPDATE_N_WRITE == 0 )); then
+  UPDATE_PAYLOAD_LINE="Payload: already matches target — nothing to deploy"
+fi
 
 # Dry runs evaluate only: full narrative, zero writes of any kind — no
 # verification record, no checkout advance, no launcher lifecycle. A clean
@@ -540,6 +739,7 @@ UPDATE_PAYLOAD_LINE="Payload: ${UPDATE_N_WRITE} files to deploy (${UPDATE_N_UPD}
 if [[ "${DEPLOY_UPDATE_DRYRUN:-false}" == true ]]; then
   update_scope_head
   echo "$UPDATE_PAYLOAD_LINE"
+  update_repo_summary "$UPDATE_FROM_REV" "$APPLY_TARGET" || true
   if (( UPDATE_N_WRITE == 0 )); then
     UPDATE_HEAD_NOW=""
     UPDATE_HEAD_NOW=$(git -C "$REPO_ROOT" rev-parse --verify HEAD^{commit} 2>/dev/null || true)
@@ -556,6 +756,7 @@ fi
 
 if (( UPDATE_N_WRITE == 0 )); then
   update_record_verified || true
+  update_record_fingerprint || true
   update_advance_checkout || true
   # Launcher repair is captured, not just printed: a repaired launcher
   # means this run did work, so the verdict below must not claim a pure
@@ -579,6 +780,7 @@ if (( UPDATE_N_WRITE == 0 )); then
   fi
   update_scope_head
   echo "$UPDATE_PAYLOAD_LINE"
+  update_repo_summary "$UPDATE_FROM_REV" "$APPLY_TARGET" || true
   # Deployment state and tool revision are distinct: the payload can be
   # current while the checkout's own updater lags the deployed target
   # (explicit --at always runs local logic by design). Handoff-inner runs
@@ -595,13 +797,14 @@ if (( UPDATE_N_WRITE == 0 )); then
   if [[ "$UPDATE_LAUNCHER_REPAIRED" == true ]]; then
     printf '%s\n' "$UPDATE_LAUNCHER_OUT"
   fi
-  echo -e "${STY_GREEN}✓${STY_RST} Up to date at ${UPDATE_TARGET_SHORT} — payload matches, nothing to deploy"
+  echo -e "${STY_GREEN}✓${STY_RST} Up to date at ${UPDATE_TARGET_SHORT}"
   exit 0
 fi
 
 # --- Mutation path (the only writer; reached solely through shared gates). ---
 update_scope_head
 echo "$UPDATE_PAYLOAD_LINE"
+update_repo_summary "$UPDATE_FROM_REV" "$APPLY_TARGET" || true
 update_stage "Applying update"
 UPDATE_RUN_RC=0
 update_tech deploy_apply_run_fresh || UPDATE_RUN_RC=$?
@@ -625,6 +828,7 @@ fi
 UPDATE_DEPLOYED="?"
 UPDATE_DEPLOYED=$(jq -r '.fully_deployed // "?"' "$APPLY_SD/$DEPLOY_IDENTITY_NAME" 2>/dev/null || echo "?")
 update_record_verified || true
+update_record_fingerprint || true
 update_advance_checkout || true
 setup_launcher_ensure
 echo -e "${STY_GREEN}✓${STY_RST} Updated to ${UPDATE_TARGET_SHORT} — ${UPDATE_N_WRITE} written, ${UPDATE_N_KEEP} kept · fully_deployed=${UPDATE_DEPLOYED}"

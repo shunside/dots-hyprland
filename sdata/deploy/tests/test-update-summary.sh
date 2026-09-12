@@ -124,7 +124,7 @@ grep -q "checkout $BASE_SHORT evaluated as-is" /tmp/sum-b.out \
   && pass "B names the unevaluated checkout" || fail "B names the unevaluated checkout"
 [[ "$(grep -c '^Updating ' /tmp/sum-b.out)" == "1" ]] \
   && pass "B prints one summary, not two" || fail "B prints one summary, not two"
-grep -q "^Payload: 0 files to deploy" /tmp/sum-b.out \
+grep -q "^Payload: already matches target" /tmp/sum-b.out \
   && pass "B scopes its zero to payload" || fail "B scopes its zero to payload"
 grep -q "^✓ Up to date at $TIP1_SHORT" /tmp/sum-b.out && ! grep -q "Already" /tmp/sum-b.out \
   && pass "B verdict is became-current" || fail "B verdict is became-current"
@@ -286,6 +286,59 @@ if grep -q "will change" /tmp/sum-d.out /tmp/sum-b.out /tmp/sum-a.out; then
 else
   pass "no shape uses the old conflated wording"
 fi
+
+echo "--- H: fast steady path and its invalidation ---"
+CF="$T/fast"
+git clone -q "$U" "$CF" 2>/dev/null
+rm -rf "$T/hh" && cp -r "$H0" "$T/hh" && HH="$T/hh" && SDH="$HH/.config/illogical-impulse"
+printf 'v2\n' > "$HH/.config/app/upd.conf"
+entry_adopt "$HH" "$CF" "$(git -C "$CF" rev-parse HEAD)"
+entry_update "$HH" "$CF" > /tmp/sum-h1.out 2>&1
+[[ $? == 0 ]] && pass "H first update exits 0" || fail "H first update exits 0"
+[[ -f "$SDH/steady-fingerprint.json" && -f "$SDH/steady-live.txt" ]] \
+  && pass "H success records the fingerprint" || fail "H success records the fingerprint"
+if grep -q "(quick check)" /tmp/sum-h1.out; then
+  fail "H first run evaluates fully"
+else
+  pass "H first run evaluates fully"
+fi
+entry_update "$HH" "$CF" > /tmp/sum-h2.out 2>&1
+grep -q "(quick check)" /tmp/sum-h2.out \
+  && pass "H second run takes the fast path" || fail "H second run takes the fast path"
+[[ "$(grep -c '^Updating \|^Payload:\|^Repository:' /tmp/sum-h2.out)" == "0" ]] \
+  && pass "H fast verdict stands alone" || fail "H fast verdict stands alone"
+# Remote advance invalidates back to the full path.
+git -C "$R" -c user.email=fixture@example -c user.name=fixture -c commit.gpgsign=false \
+  commit -q --allow-empty -m "remote moves again" 2>/dev/null
+git -C "$R" push -q origin main 2>/dev/null
+entry_update "$HH" "$CF" > /tmp/sum-h3.out 2>&1
+grep -q "fetched origin/main" /tmp/sum-h3.out && ! grep -q "(quick check)" /tmp/sum-h3.out \
+  && pass "H remote advance falls through" || fail "H remote advance falls through"
+# Launcher breakage invalidates into repair, not steady silence.
+rm -f "$HH/.config/fish/conf.d/impulse-path.fish"
+entry_update "$HH" "$CF" > /tmp/sum-h4.out 2>&1
+grep -q "new shells pick it up automatically" /tmp/sum-h4.out && ! grep -q "Already" /tmp/sum-h4.out \
+  && pass "H launcher repair is announced" || fail "H launcher repair is announced"
+[[ -f "$HH/.config/fish/conf.d/impulse-path.fish" ]] \
+  && pass "H launcher repaired" || fail "H launcher repaired"
+# Live touch (same bytes, new mtime) forces re-verification; the output
+# stays honest, and the next run is fast again.
+touch "$HH/.config/app/upd.conf"
+entry_update "$HH" "$CF" > /tmp/sum-h5.out 2>&1
+grep -q "^✓ Already up to date at " /tmp/sum-h5.out && ! grep -q "(quick check)" /tmp/sum-h5.out \
+  && pass "H touched live re-evaluates fully" || fail "H touched live re-evaluates fully"
+entry_update "$HH" "$CF" > /tmp/sum-h5b.out 2>&1
+grep -q "(quick check)" /tmp/sum-h5b.out \
+  && pass "H re-converges to fast" || fail "H re-converges to fast"
+# Dirty running code (sdata) disables the cheap proof without breaking it.
+printf '# scratch\n' >> "$CF/sdata/lib/deploy-common.sh"
+entry_update "$HH" "$CF" > /tmp/sum-h6.out 2>&1
+grep -q "^✓ Already up to date at " /tmp/sum-h6.out && ! grep -q "(quick check)" /tmp/sum-h6.out \
+  && pass "H dirty code re-evaluates fully" || fail "H dirty code re-evaluates fully"
+git -C "$CF" checkout -q -- sdata/lib/deploy-common.sh 2>/dev/null
+entry_update "$HH" "$CF" > /tmp/sum-h6b.out 2>&1
+grep -q "(quick check)" /tmp/sum-h6b.out \
+  && pass "H clean code is fast again" || fail "H clean code is fast again"
 
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" == 0 ]]

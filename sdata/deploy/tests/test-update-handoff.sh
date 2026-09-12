@@ -214,7 +214,7 @@ adopt_at "$H5" "$S0"
   XDG_BIN_HOME="$H5/.local/bin" PATH="$BIN:$PATH" \
   impulse update --at "$S2" --home "$H5" --state-dir "$SD5" </dev/null > /tmp/hand-skew.out 2>&1)
 [[ $? == 0 ]] && pass "repeated explicit pin is a noop" || fail "repeated explicit pin is a noop"
-grep -q "payload matches, nothing to deploy" /tmp/hand-skew.out \
+grep -q "Payload: already matches target" /tmp/hand-skew.out \
   && pass "noop wording names the payload" || fail "noop wording names the payload"
 grep -q "tool revision differs" /tmp/hand-skew.out \
   && pass "noop names the updater skew" || fail "noop names the updater skew"
