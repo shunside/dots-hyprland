@@ -130,11 +130,11 @@ grep -q "^✓ Up to date at $TIP1_SHORT" /tmp/sum-b.out && ! grep -q "Already" /
   && pass "B verdict is became-current" || fail "B verdict is became-current"
 
 echo "--- C: followed checkout needs no delegation ---"
-grep -q "fetched origin/main .* -> $TIP1_SHORT" /tmp/sum-b.out \
+grep -q "origin/main advanced .* -> $TIP1_SHORT" /tmp/sum-b.out \
   && pass "C reports the tracking advance" || fail "C reports the tracking advance"
 entry_update "$HB" "$C" > /tmp/sum-c.out 2>&1
 [[ $? == 0 ]] && pass "C steady-state exits 0" || fail "C steady-state exits 0"
-if grep -q "fetched origin/main" /tmp/sum-c.out; then
+if grep -q "origin/main advanced" /tmp/sum-c.out; then
   fail "C stays silent when nothing moved"
 else
   pass "C stays silent when nothing moved"
@@ -209,7 +209,7 @@ entry_update "$HF" "$CF" > /tmp/sum-f.out 2>&1
 [[ $? == 0 ]] && pass "F detached update exits 0" || fail "F detached update exits 0"
 grep -q "no remote tracking branch configured" /tmp/sum-f.out \
   && pass "F says it runs local-only" || fail "F says it runs local-only"
-if grep -q "Handed off\|Advanced checkout\|fetched " /tmp/sum-f.out; then
+if grep -q "Handed off\|Advanced checkout\|advanced " /tmp/sum-f.out; then
   fail "F touches no remote state"
 else
   pass "F touches no remote state"
@@ -287,6 +287,51 @@ else
   pass "no shape uses the old conflated wording"
 fi
 
+echo "--- I: tty narrative is segmented, piped output is clean ---"
+if ! command -v script >/dev/null 2>&1; then
+  echo "SKIP: script(1) unavailable for pty checks"
+else
+  rm -rf "$T/hi" && cp -r "$H0" "$T/hi" && HI="$T/hi" && SDI="$HI/.config/illogical-impulse"
+  printf 'v2\n' > "$HI/.config/app/upd.conf"
+  entry_adopt "$HI" "$C" "$(git -C "$C" rev-parse origin/main)"
+  git -C "$R" -c user.email=fixture@example -c user.name=fixture -c commit.gpgsign=false \
+    commit -q --allow-empty -m "remote moves for pty" 2>/dev/null
+  git -C "$R" push -q origin main 2>/dev/null
+  (cd /tmp && HOME="$HI" XDG_CONFIG_HOME="$HI/.config" XDG_DATA_HOME="$HI/.local/share" \
+    XDG_BIN_HOME="$HI/.local/bin" TERM_SPIN_INTERVAL=0.001 \
+    script -qec "$C/setup update --home $HI --state-dir $SDI" /dev/null > /tmp/sum-i.out 2>&1 < /dev/null)
+  [[ $? == 0 ]] && pass "I pty update exits 0" || fail "I pty update exits 0: $(tail -n 3 /tmp/sum-i.out)"
+  if grep -q '[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]' /tmp/sum-i.out; then
+    pass "I spinner frames appear on a tty"
+  else
+    fail "I spinner frames appear on a tty"
+  fi
+  tr '\r' '\n' < /tmp/sum-i.out > /tmp/sum-i.seg
+  if grep -qE "(Checking for updates|Evaluating update)[^[:space:]]" /tmp/sum-i.seg; then
+    fail "I no stage-note concatenation"
+  else
+    pass "I no stage-note concatenation"
+  fi
+  # Content asserts run against ANSI-stripped lines (tty styling prefixes
+  # the segments); residue/frame asserts above use the raw stream.
+  sed 's/\x1b\[[0-9;]*m//g' /tmp/sum-i.seg > /tmp/sum-i.plain
+  for pat in '^note: origin/main advanced' '^Handed off to updater' '^Updating payload' '^Payload:' '^✓ Up to date at'; do
+    if grep -q "$pat" /tmp/sum-i.plain; then
+      pass "I segment starts cleanly: $pat"
+    else
+      fail "I segment starts cleanly: $pat"
+    fi
+  done
+  [[ "$(grep -c '^Updating ' /tmp/sum-i.plain)" == "1" ]] \
+    && pass "I one scope header on tty" || fail "I one scope header on tty"
+fi
+for f in /tmp/sum-a.out /tmp/sum-b.out /tmp/sum-c.out /tmp/sum-d.out /tmp/sum-e.out /tmp/sum-g.out /tmp/sum-h2.out; do
+  if [[ -f "$f" ]] && grep -q $'\e' "$f"; then
+    fail "piped output stays plain: $(basename "$f")"
+  fi
+done
+pass "piped output stays plain"
+
 echo "--- H: fast steady path and its invalidation ---"
 CF="$T/fast"
 git clone -q "$U" "$CF" 2>/dev/null
@@ -312,7 +357,7 @@ git -C "$R" -c user.email=fixture@example -c user.name=fixture -c commit.gpgsign
   commit -q --allow-empty -m "remote moves again" 2>/dev/null
 git -C "$R" push -q origin main 2>/dev/null
 entry_update "$HH" "$CF" > /tmp/sum-h3.out 2>&1
-grep -q "fetched origin/main" /tmp/sum-h3.out && ! grep -q "(quick check)" /tmp/sum-h3.out \
+grep -q "origin/main advanced" /tmp/sum-h3.out && ! grep -q "(quick check)" /tmp/sum-h3.out \
   && pass "H remote advance falls through" || fail "H remote advance falls through"
 # Launcher breakage invalidates into repair, not steady silence.
 rm -f "$HH/.config/fish/conf.d/impulse-path.fish"

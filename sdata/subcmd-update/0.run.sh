@@ -95,6 +95,16 @@ update_stage(){
     term_spin_start "$1"
   fi
 }
+
+# Persistent line: always stop the spinner first, so a transient frame can
+# never concatenate with a permanent line on a TTY (the reported
+# "Checking for updatesnote:" residue). Off-TTY this is a plain print.
+# All normal-path output goes through here; blocked/error paths below stop
+# explicitly before their own prints.
+update_emit(){
+  term_spin_stop || true
+  printf '%b\n' "$*"
+}
 # Run a lib entry, capturing technical output unless verbose. Both
 # streams are captured: success/failure reporting below speaks in user
 # concepts, and the transaction machinery (journal ids, preflight
@@ -319,7 +329,7 @@ update_advance_checkout(){
     local bs as
     bs="$(git -C "$REPO_ROOT" rev-parse --short "$before" 2>/dev/null || printf '%s' "${before:0:7}")"
     as="$(git -C "$REPO_ROOT" rev-parse --short "$after" 2>/dev/null || printf '%s' "${after:0:7}")"
-    echo "Advanced checkout ${bs} -> ${as}"
+    update_emit "Advanced checkout ${bs} -> ${as}"
   fi
   return 0
 }
@@ -327,13 +337,13 @@ update_advance_checkout(){
 # Evaluation scope header shared by every non-steady shape: which payload
 # window is being reconciled with which target, plus divergence context.
 update_scope_head(){
-  echo -e "Updating payload ${UPDATE_BASE_SHORT} ${STY_FAINT}->${STY_RST} ${STY_BOLD}${UPDATE_TARGET_SHORT}${STY_RST}${UPDATE_TARGET_WHENCE:-}"
+  update_emit "Updating payload ${UPDATE_BASE_SHORT} ${STY_FAINT}->${STY_RST} ${STY_BOLD}${UPDATE_TARGET_SHORT}${STY_RST}${UPDATE_TARGET_WHENCE:-}"
   # Local-only commits never ride along implicitly: name them instead.
   if [[ -n "${UPDATE_DISCOVERED_FROM:-}" && "$UPDATE_DISCOVERED_FROM" != local* ]]; then
     UPDATE_AHEAD=0
     UPDATE_AHEAD=$(git -C "$REPO_ROOT" rev-list --count "$APPLY_TARGET..HEAD" 2>/dev/null || echo 0)
     if [[ "$UPDATE_AHEAD" =~ ^[0-9]+$ ]] && (( UPDATE_AHEAD > 0 )); then
-      echo -e "${STY_FAINT}note: local branch holds $UPDATE_AHEAD commit(s) not on $UPDATE_DISCOVERED_FROM; deploying the remote tip, local work untouched.${STY_RST}"
+      update_emit "${STY_FAINT}note: local branch holds $UPDATE_AHEAD commit(s) not on $UPDATE_DISCOVERED_FROM; deploying the remote tip, local work untouched.${STY_RST}"
     fi
   fi
 }
@@ -358,9 +368,9 @@ update_repo_summary(){
   fi
   shead="$(git -C "$REPO_ROOT" rev-parse --short "$base" 2>/dev/null || printf '%s' "${base:0:7}")"
   if (( total == 1 )); then
-    echo "Repository: 1 file changed since ${shead} (${shown})"
+    update_emit "Repository: 1 file changed since ${shead} (${shown})"
   else
-    echo "Repository: ${total} files changed since ${shead} (${shown})"
+    update_emit "Repository: ${total} files changed since ${shead} (${shown})"
   fi
   return 0
 }
@@ -449,7 +459,7 @@ if [[ "${DEPLOY_UPDATE_AT_GIVEN:-false}" != true ]]; then
     done < <(git -C "$REPO_ROOT" remote 2>/dev/null || true)
     if [[ -z "$UPDATE_REMOTE" || -z "$UPDATE_BRANCH" ]]; then
       term_spin_stop || true
-      echo -e "${STY_FAINT}note: tracking ref $UPDATE_UPSTREAM matches no configured remote; using the local checkout.${STY_RST}"
+      update_emit "${STY_FAINT}note: tracking ref $UPDATE_UPSTREAM matches no configured remote; using the local checkout.${STY_RST}"
     else
       UPDATE_FETCH_ERR=""
       # Record the ref before fetching: a moved tracking ref is repository
@@ -480,7 +490,7 @@ if [[ "${DEPLOY_UPDATE_AT_GIVEN:-false}" != true ]]; then
       if [[ "$UPDATE_FETCH_BEFORE" =~ ^[0-9a-f]{40}$ && "$UPDATE_FETCH_BEFORE" != "$UPDATE_RESOLVED" ]]; then
         UPDATE_FETCH_BEFORE_SHORT=$(git -C "$REPO_ROOT" rev-parse --short "$UPDATE_FETCH_BEFORE" 2>/dev/null || printf '%s' "${UPDATE_FETCH_BEFORE:0:7}")
         UPDATE_FETCH_AFTER_SHORT=$(git -C "$REPO_ROOT" rev-parse --short "$UPDATE_RESOLVED" 2>/dev/null || printf '%s' "${UPDATE_RESOLVED:0:7}")
-        echo -e "${STY_FAINT}note: fetched $UPDATE_REMOTE/$UPDATE_BRANCH ${UPDATE_FETCH_BEFORE_SHORT} -> ${UPDATE_FETCH_AFTER_SHORT}${STY_RST}"
+        update_emit "${STY_FAINT}note: $UPDATE_REMOTE/$UPDATE_BRANCH advanced ${UPDATE_FETCH_BEFORE_SHORT} -> ${UPDATE_FETCH_AFTER_SHORT}${STY_RST}"
         UPDATE_FETCH_MOVED=true
       fi
     fi
@@ -497,10 +507,10 @@ if [[ "${DEPLOY_UPDATE_AT_GIVEN:-false}" != true ]]; then
     UPDATE_DISCOVERED_FROM="local $UPDATE_LOCAL_TRACK"
     UPDATE_PIN_SUFFIX+=" --at $UPDATE_RESOLVED"
     term_spin_stop || true
-    echo -e "${STY_FAINT}note: tracking local branch $UPDATE_LOCAL_TRACK (no remote involved).${STY_RST}"
+    update_emit "${STY_FAINT}note: tracking local branch $UPDATE_LOCAL_TRACK (no remote involved).${STY_RST}"
   else
     term_spin_stop || true
-    echo -e "${STY_FAINT}note: no remote tracking branch configured; using the local checkout. Pass --at explicitly to pin a revision, or set an upstream to track the fork.${STY_RST}"
+    update_emit "${STY_FAINT}note: no remote tracking branch configured; using the local checkout. Pass --at explicitly to pin a revision, or set an upstream to track the fork.${STY_RST}"
   fi
 fi
 
@@ -513,7 +523,7 @@ term_spin_stop || true
 # suffix marks the cheap proof so instant answers stay trustworthy.
 if update_fast_current 2>/dev/null; then
   UPDATE_FAST_SHORT=$(git -C "$REPO_ROOT" rev-parse --short "${DEPLOY_AT}" 2>/dev/null || printf '%s' "${DEPLOY_AT:0:7}")
-  echo -e "${STY_GREEN}✓${STY_RST} Already up to date at ${UPDATE_FAST_SHORT} — payload matches, nothing to deploy (quick check)"
+  update_emit "${STY_GREEN}✓${STY_RST} Already up to date at ${UPDATE_FAST_SHORT} — payload matches, nothing to deploy (quick check)"
   exit 0
 fi
 
@@ -559,7 +569,7 @@ if [[ "${DEPLOY_UPDATE_AT_GIVEN:-false}" != true && -n "${UPDATE_DISCOVERED_FROM
     else
       UPDATE_HEAD_SHORT="unknown"
     fi
-    echo "Handed off to updater ${UPDATE_HANDOFF_SHORT} (checkout ${UPDATE_HEAD_SHORT} evaluated as-is)"
+    update_emit "Handed off to updater ${UPDATE_HANDOFF_SHORT} (checkout ${UPDATE_HEAD_SHORT} evaluated as-is)"
     (
       # Pin the full driver contract explicitly: the inner runner belongs
       # to another revision and may expect variables this runner never
@@ -738,19 +748,19 @@ fi
 # the explicit dry disclaimer.
 if [[ "${DEPLOY_UPDATE_DRYRUN:-false}" == true ]]; then
   update_scope_head
-  echo "$UPDATE_PAYLOAD_LINE"
+  update_emit "$UPDATE_PAYLOAD_LINE"
   update_repo_summary "$UPDATE_FROM_REV" "$APPLY_TARGET" || true
   if (( UPDATE_N_WRITE == 0 )); then
     UPDATE_HEAD_NOW=""
     UPDATE_HEAD_NOW=$(git -C "$REPO_ROOT" rev-parse --verify HEAD^{commit} 2>/dev/null || true)
     if [[ "${UPDATE_HANDED_OFF:-false}" != true && "${UPDATE_FETCH_MOVED:-false}" != true ]] \
       && [[ -n "$UPDATE_HEAD_NOW" && -n "${APPLY_TARGET:-}" && "$UPDATE_HEAD_NOW" == "$APPLY_TARGET" ]]; then
-      echo -e "${STY_GREEN}✓${STY_RST} Already up to date at ${UPDATE_TARGET_SHORT} — payload matches, nothing to deploy"
+      update_emit "${STY_GREEN}✓${STY_RST} Already up to date at ${UPDATE_TARGET_SHORT} — payload matches, nothing to deploy"
     else
-      echo -e "${STY_GREEN}✓${STY_RST} Up to date at ${UPDATE_TARGET_SHORT} — payload matches, nothing to deploy"
+      update_emit "${STY_GREEN}✓${STY_RST} Up to date at ${UPDATE_TARGET_SHORT} — payload matches, nothing to deploy"
     fi
   fi
-  echo "dry run: showing the above without applying anything (nothing changed)"
+  update_emit "dry run: showing the above without applying anything (nothing changed)"
   exit 0
 fi
 
@@ -775,11 +785,11 @@ if (( UPDATE_N_WRITE == 0 )); then
   if [[ "${UPDATE_HANDED_OFF:-false}" != true && "${UPDATE_FETCH_MOVED:-false}" != true ]] \
     && [[ "$UPDATE_LAUNCHER_REPAIRED" != true ]] \
     && [[ -n "$UPDATE_HEAD_NOW" && -n "${APPLY_TARGET:-}" && "$UPDATE_HEAD_NOW" == "$APPLY_TARGET" ]]; then
-    echo -e "${STY_GREEN}✓${STY_RST} Already up to date at ${UPDATE_TARGET_SHORT} — payload matches, nothing to deploy"
+    update_emit "${STY_GREEN}✓${STY_RST} Already up to date at ${UPDATE_TARGET_SHORT} — payload matches, nothing to deploy"
     exit 0
   fi
   update_scope_head
-  echo "$UPDATE_PAYLOAD_LINE"
+  update_emit "$UPDATE_PAYLOAD_LINE"
   update_repo_summary "$UPDATE_FROM_REV" "$APPLY_TARGET" || true
   # Deployment state and tool revision are distinct: the payload can be
   # current while the checkout's own updater lags the deployed target
@@ -791,19 +801,19 @@ if (( UPDATE_N_WRITE == 0 )); then
     UPDATE_RUNNER_HEAD=$(git -C "$REPO_ROOT" rev-parse --verify HEAD^{commit} 2>/dev/null || true)
     if [[ -n "$UPDATE_RUNNER_HEAD" && -n "${APPLY_TARGET:-}" && "$UPDATE_RUNNER_HEAD" != "$APPLY_TARGET" ]]; then
       UPDATE_RUNNER_SHORT=$(git -C "$REPO_ROOT" rev-parse --short "$UPDATE_RUNNER_HEAD" 2>/dev/null || printf '%s' "${UPDATE_RUNNER_HEAD:0:7}")
-      echo -e "${STY_FAINT}note: this updater itself is running from ${UPDATE_RUNNER_SHORT}, not ${UPDATE_TARGET_SHORT} — payload is current, tool revision differs.${STY_RST}"
+      update_emit "${STY_FAINT}note: this updater itself is running from ${UPDATE_RUNNER_SHORT}, not ${UPDATE_TARGET_SHORT} — payload is current, tool revision differs.${STY_RST}"
     fi
   fi
   if [[ "$UPDATE_LAUNCHER_REPAIRED" == true ]]; then
-    printf '%s\n' "$UPDATE_LAUNCHER_OUT"
+    update_emit "$UPDATE_LAUNCHER_OUT"
   fi
-  echo -e "${STY_GREEN}✓${STY_RST} Up to date at ${UPDATE_TARGET_SHORT}"
+  update_emit "${STY_GREEN}✓${STY_RST} Up to date at ${UPDATE_TARGET_SHORT}"
   exit 0
 fi
 
 # --- Mutation path (the only writer; reached solely through shared gates). ---
 update_scope_head
-echo "$UPDATE_PAYLOAD_LINE"
+update_emit "$UPDATE_PAYLOAD_LINE"
 update_repo_summary "$UPDATE_FROM_REV" "$APPLY_TARGET" || true
 update_stage "Applying update"
 UPDATE_RUN_RC=0
@@ -831,5 +841,5 @@ update_record_verified || true
 update_record_fingerprint || true
 update_advance_checkout || true
 setup_launcher_ensure
-echo -e "${STY_GREEN}✓${STY_RST} Updated to ${UPDATE_TARGET_SHORT} — ${UPDATE_N_WRITE} written, ${UPDATE_N_KEEP} kept · fully_deployed=${UPDATE_DEPLOYED}"
+update_emit "${STY_GREEN}✓${STY_RST} Updated to ${UPDATE_TARGET_SHORT} — ${UPDATE_N_WRITE} written, ${UPDATE_N_KEEP} kept · fully_deployed=${UPDATE_DEPLOYED}"
 exit 0
